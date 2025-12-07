@@ -127,5 +127,13 @@ SUPPLIER_RULEBOOK = {
     
     "North Riding Brewery": "DISCOUNT: Handle '(discount)' line item (negative total). Divide by units.",
     
-    "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions."
+    "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions.",
+
+   "German Drinks Company Limited": """
+   For German Drinks Company Limited
+   - The Supplier_Name is part of the Product_Name e.g. Rothaus Pils - Rothaus is the supplier - Pils is the Product_Name
+   - The format will always be bottles, unless it is keg then it is always steel keg
+   - Payable to is German Drinks Company Limited
+
+""",
 }
