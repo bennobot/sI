@@ -122,9 +122,8 @@ VALID FORMATS LIST:
 """
 
 # ==========================================
-# 3. SUPPLIER SPECIFIC RULES (Hard-Coded)
+# 3. SUPPLIER SPECIFIC RULES
 # ==========================================
-# To add a new supplier, just add a new line to this dictionary.
 
 SUPPLIER_RULES = {
     "Generic / Unknown": "Use standard global logic.",
@@ -156,13 +155,16 @@ SUPPLIER_RULES = {
 # 4. MAIN APPLICATION
 # ==========================================
 
+# Initialize session state to hold data across re-runs
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
+
 with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
     
     st.markdown("---")
     st.subheader("Select Supplier Logic")
-    # This reads directly from the hard-coded dictionary above
     selected_supplier = st.selectbox("Supplier", list(SUPPLIER_RULES.keys()))
     
     st.info(f"**Active Rules:**\n{SUPPLIER_RULES[selected_supplier]}")
@@ -170,57 +172,76 @@ with st.sidebar:
 st.subheader("1. Upload Invoice")
 uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
 
+# Reset data if new file uploaded
+if uploaded_file:
+    if 'last_uploaded_file' not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
+        st.session_state.processed_data = None
+        st.session_state.last_uploaded_file = uploaded_file.name
+
 if uploaded_file and api_key:
-    try:
-        genai.configure(api_key=api_key)
-        # Using the latest model you confirmed works
-        model = genai.GenerativeModel('models/gemini-2.5-flash')
-        
-        with st.spinner("OCR Scanning..."):
-            images = convert_from_bytes(uploaded_file.read(), dpi=300)
-            full_text = ""
-            for img in images:
-                full_text += pytesseract.image_to_string(img) + "\n"
-
-        # Construct Prompt
-        active_rules = SUPPLIER_RULES[selected_supplier]
-        
-        prompt = f"""
-        Extract invoice line items into a JSON list.
-        
-        COLUMNS TO EXTRACT:
-        "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price" (Net).
-        
-        GLOBAL RULES:
-        {GLOBAL_RULES_TEXT}
-
-        SUPPLIER SPECIFIC RULES:
-        {active_rules}
-        
-        Return ONLY valid JSON.
-        
-        INVOICE TEXT:
-        {full_text}
-        """
-
-        with st.spinner(f"AI Processing ({selected_supplier})..."):
-            response = model.generate_content(prompt)
-            json_text = response.text.strip().replace("```json", "").replace("```", "")
-            data = json.loads(json_text)
+    # THE PROCESS BUTTON
+    if st.button("🚀 Process Invoice", type="primary"):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('models/gemini-2.5-flash')
             
-            df = pd.DataFrame(data)
-            
-            # Column Ordering
-            cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price"]
-            existing_cols = [c for c in cols if c in df.columns]
-            df = df[existing_cols]
-            
-            # Results
-            st.subheader("2. Extracted Data")
-            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
-            
-            csv = edited_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download CSV", csv, "invoice.csv", "text/csv")
+            with st.spinner("OCR Scanning & AI Processing..."):
+                # 1. OCR
+                uploaded_file.seek(0)
+                images = convert_from_bytes(uploaded_file.read(), dpi=300)
+                full_text = ""
+                for img in images:
+                    full_text += pytesseract.image_to_string(img) + "\n"
 
-    except Exception as e:
-        st.error(f"Error: {e}")
+                # 2. AI Prompt
+                active_rules = SUPPLIER_RULES[selected_supplier]
+                prompt = f"""
+                Extract invoice line items into a JSON list.
+                
+                COLUMNS TO EXTRACT:
+                "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price" (Net).
+                
+                GLOBAL RULES:
+                {GLOBAL_RULES_TEXT}
+
+                SUPPLIER SPECIFIC RULES:
+                {active_rules}
+                
+                Return ONLY valid JSON.
+                
+                INVOICE TEXT:
+                {full_text}
+                """
+
+                # 3. Generate
+                response = model.generate_content(prompt)
+                json_text = response.text.strip().replace("```json", "").replace("```", "")
+                data = json.loads(json_text)
+                
+                # 4. Save to Session State
+                df = pd.DataFrame(data)
+                
+                # Column Ordering
+                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price"]
+                existing_cols = [c for c in cols if c in df.columns]
+                st.session_state.processed_data = df[existing_cols]
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# Display Logic (Outside the button, so it stays on screen)
+if st.session_state.processed_data is not None:
+    st.divider()
+    st.subheader("2. Extracted Data")
+    
+    # Editable Dataframe
+    edited_df = st.data_editor(st.session_state.processed_data, num_rows="dynamic", use_container_width=True)
+    
+    # Download Button
+    csv = edited_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv,
+        file_name="invoice.csv",
+        mime="text/csv"
+    )
