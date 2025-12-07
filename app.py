@@ -5,12 +5,18 @@ import pytesseract
 import google.generativeai as genai
 import json
 import os
-from streamlit_gsheets import GSheetsConnection
 
-st.set_page_config(layout="wide", page_title="Brewery Invoice Parser (Cloud)")
-st.title("Brewery Invoice Parser ☁️ (Gemini 2.5 + Sheets)")
+# --- 1. SAFE IMPORT FOR SHEETS ---
+try:
+    from streamlit_gsheets import GSheetsConnection
+    SHEETS_AVAILABLE = True
+except ImportError:
+    SHEETS_AVAILABLE = False
 
-# --- 1. CONFIGURATION: MASTER DATA ---
+st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
+st.title("Brewery Invoice Parser ⚡")
+
+# --- 2. CONFIGURATION: MASTER DATA ---
 
 VALID_FORMATS = """
 Cask | 9 Gallon
@@ -85,39 +91,25 @@ Cellar Equipment | 250 Pack
 
 GLOBAL_RULES_TEXT = f"""
 1. **PRODUCT NAMES & COLLABORATORS**:
-   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft", "Polly's x Cloudwater"). Extract the partner name into the "Collaborator" field.
-   - **Product Name**: Extract the core beer name ONLY. Remove size info, prefixes, and the collaborator name.
-   - **Styles**: Remove generic style descriptors (IPA, Stout, Pale Ale) from the name unless it is the ONLY name.
-   - **Title Case**: Convert Product Name to Title Case (e.g. "DARK ISLAND" -> "Dark Island").
+   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft"). Extract partner name.
+   - **Product Name**: Extract core beer name ONLY. Remove size info, prefixes, and collaborator.
+   - **Styles**: Remove generic styles (IPA, Stout) unless it is the only name.
+   - **Title Case**: Convert Product Name to Title Case.
 
 2. **STRICT FORMAT MAPPING**:
-   - Map every item to the "VALID FORMATS LIST" below.
-   
-   **SPECIFIC KEG/CASK RULES:**
-   - "Firkin" -> "Cask" / "9 Gallon".
-   - "Pin" -> "Cask" / "4.5 Gallon".
-   - **KEGSTAR / eKEG Logic**:
-     - IF description contains "Kegstar" OR "eKeg":
-       - CHECK SIZE: If size is "41L" or "41 Litre" -> Map to Format: "Cask", Volume: "9 Gallon".
-       - ELSE (e.g. 30L, 50L) -> Map to Format: "Steel Keg" (preserve volume).
+   - Map items to "VALID FORMATS LIST".
+   - **Kegstar / eKeg**: IF size is "41L" -> Cask 9 Gallon. ELSE -> Steel Keg.
+   - Convert ml to cl. L/Ltr to Litre.
 
-   **UNIT CONVERSIONS:**
-   - Convert ml to cl (e.g. 440ml -> 44cl).
-   - Convert L/Ltr -> Litre.
+3. **Pack Size**: Bottles/Cans=Count. Kegs=Null.
 
-3. **Pack Size**:
-   - Bottles/Cans: Extract pack count.
-   - Kegs/Casks: Leave blank/null.
-
-4. **Item_Price**: 
-   - NET price per single unit (per keg or per case).
-   - Apply line-item discounts.
+4. **Item_Price**: NET price per single unit.
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
 """
 
-# --- 2. PERSISTENCE: GOOGLE SHEETS CONNECTION ---
+# --- 3. LOGIC MANAGER (Cloud or Local) ---
 
 DEFAULT_SUPPLIER_RULES = {
     "Generic / Unknown": "Use standard global logic.",
@@ -127,56 +119,130 @@ DEFAULT_SUPPLIER_RULES = {
     "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions."
 }
 
-def load_rules_from_sheet():
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="Rules", ttl=0)
-        # Convert to dict
-        rules_dict = pd.Series(df.Rules.values, index=df.Supplier).to_dict()
-        
-        # Ensure Generic exists
-        if "Generic / Unknown" not in rules_dict:
-            rules_dict["Generic / Unknown"] = "Use standard global logic."
-        return rules_dict
-    except Exception as e:
-        # Fallback if sheet is empty or connection fails
-        return DEFAULT_SUPPLIER_RULES
+def load_rules():
+    # Try Cloud first
+    if SHEETS_AVAILABLE:
+        try:
+            conn = st.connection("gsheets", type=GSheetsConnection)
+            df = conn.read(worksheet="Rules", ttl=0)
+            return pd.Series(df.Rules.values, index=df.Supplier).to_dict()
+        except Exception:
+            pass # Fail silently to Local
+            
+    # Fallback to Local
+    if os.path.exists("rules.json"):
+        with open("rules.json", "r") as f:
+            return json.load(f)
+            
+    return DEFAULT_SUPPLIER_RULES.copy()
 
-def save_rule_to_sheet(supplier, new_rule_text):
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(worksheet="Rules", ttl=0)
-    
-    # Check if supplier exists
-    if supplier in df['Supplier'].values:
-        df.loc[df['Supplier'] == supplier, 'Rules'] = new_rule_text
-    else:
-        new_row = pd.DataFrame([{"Supplier": supplier, "Rules": new_rule_text}])
-        df = pd.concat([df, new_row], ignore_index=True)
-        
-    conn.update(worksheet="Rules", data=df)
-    st.cache_data.clear()
+def save_rules(supplier, text):
+    # Try Cloud
+    if SHEETS_AVAILABLE:
+        try:
+            conn = st.connection("gsheets", type=GSheetsConnection)
+            df = conn.read(worksheet="Rules", ttl=0)
+            if supplier in df['Supplier'].values:
+                df.loc[df['Supplier'] == supplier, 'Rules'] = text
+            else:
+                new_row = pd.DataFrame([{"Supplier": supplier, "Rules": text}])
+                df = pd.concat([df, new_row], ignore_index=True)
+            conn.update(worksheet="Rules", data=df)
+            st.cache_data.clear()
+            st.toast("Saved to Cloud!")
+            return
+        except Exception:
+            st.warning("Cloud save failed. Saving locally.")
 
-# Initialize Rules
+    # Fallback Local
+    current_rules = st.session_state.rules
+    current_rules[supplier] = text
+    with open("rules.json", "w") as f:
+        json.dump(current_rules, f, indent=4)
+    st.toast("Saved locally.")
+
 if 'rules' not in st.session_state:
-    st.session_state.rules = load_rules_from_sheet()
+    st.session_state.rules = load_rules()
 
-# --- 3. SIDEBAR (SETTINGS & TEACHING) ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
     
-    st.markdown("---")
-    st.subheader("🧠 Supplier Logic (Cloud)")
+    st.divider()
     
-    # Select Supplier
+    if not SHEETS_AVAILABLE:
+        st.warning("⚠️ Cloud Database disabled (Library missing or connection failed). Using Local Mode.")
+    
+    # Supplier Selection
     supplier_options = list(st.session_state.rules.keys())
+    if "Generic / Unknown" not in supplier_options:
+        supplier_options.insert(0, "Generic / Unknown")
+        
     selected_supplier = st.selectbox("Select Supplier", supplier_options)
     
-    # Add New Supplier
-    new_supplier = st.text_input("Add new supplier:")
-    if st.button("Create Locally"):
-        if new_supplier and new_supplier not in st.session_state.rules:
-            st.session_state.rules[new_supplier] = "Enter rules..."
-            st.rerun()
+    # Edit Rules
+    current_text = st.session_state.rules.get(selected_supplier, "")
+    updated_text = st.text_area("Edit Rules:", value=current_text, height=150)
+    
+    if st.button("💾 Update Rules"):
+        st.session_state.rules[selected_supplier] = updated_text
+        save_rules(selected_supplier, updated_text)
+
+# --- 5. MAIN APP (THE UPLOADER) ---
+st.subheader("1. Upload Invoice")
+uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
+
+if uploaded_file and api_key:
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
+        
+        with st.spinner("OCR Scanning..."):
+            images = convert_from_bytes(uploaded_file.read(), dpi=300)
+            full_text = ""
+            for img in images:
+                full_text += pytesseract.image_to_string(img) + "\n"
+
+        # Construct Prompt
+        active_rules = st.session_state.rules.get(selected_supplier, "")
+        
+        prompt = f"""
+        Extract invoice line items into a JSON list.
+        
+        COLUMNS TO EXTRACT:
+        "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price" (Net).
+        
+        GLOBAL RULES:
+        {GLOBAL_RULES_TEXT}
+
+        SUPPLIER SPECIFIC RULES:
+        {active_rules}
+        
+        Return ONLY valid JSON.
+        
+        INVOICE TEXT:
+        {full_text}
+        """
+
+        with st.spinner(f"AI Processing ({selected_supplier})..."):
+            response = model.generate_content(prompt)
+            json_text = response.text.strip().replace("```json", "").replace("```", "")
+            data = json.loads(json_text)
             
-    # Edit Rules (F
+            df = pd.DataFrame(data)
+            
+            # Ordering
+            cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price"]
+            existing_cols = [c for c in cols if c in df.columns]
+            df = df[existing_cols]
+            
+            # Results
+            st.subheader("2. Extracted Data")
+            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+            
+            csv = edited_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download CSV", csv, "invoice.csv", "text/csv")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
