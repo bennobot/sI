@@ -6,7 +6,7 @@ import google.generativeai as genai
 import json
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
-st.title("Brewery Invoice Parser ⚡ (Header + Lines + Matrix)")
+st.title("Brewery Invoice Parser ⚡ (Wholesaler Support)")
 
 # ==========================================
 # 1. MASTER DATA
@@ -108,19 +108,32 @@ GLOBAL_RULES_TEXT = f"""
    - **Quantity**: The number of units ordered (e.g. 5 kegs, or 10 cases).
 
 4. **FINANCIALS**: 
-   - **Item_Price**: NET price per single unit.
-   - **Header Totals**: Extract the Total Net, Total VAT, and Total Gross from the invoice summary footer.
-   - **Total Discount**: If the invoice lists a total discount amount (e.g. "Line discounts: -£616.50"), extract it.
+   - **Item_Price**: NET price per single unit (per keg or per case).
+   - **Header Totals**: Extract Net, VAT, Gross.
+   - **Total Discount**: Extract if present.
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
 """
 
 # ==========================================
-# 3. SUPPLIER RULEBOOK
+# 3. SUPPLIER RULEBOOK (Wholesaler Logic Added)
 # ==========================================
 
 SUPPLIER_RULEBOOK = {
+    "James Clay and Sons": """
+    - PARSING STRATEGY: This is a wholesaler invoice. The Description column combines Name, Pack Size, and Volume.
+    - PATTERN MATCHING: Look for the pattern "NxVol" (e.g. "20x50cl", "12x33cl", "24x44cl").
+      - The number BEFORE 'x' is the Pack_Size.
+      - The volume AFTER 'x' is the Volume.
+    - FORMAT LOGIC: 
+      - If text contains "btls" or "NRB" -> Format: "Bottles".
+      - If text contains "cans" -> Format: "Cans".
+    - PRODUCT NAME: Everything *before* the pack size pattern is the Product Name.
+      - Example: "Augustiner Hell 20x50cl NRB" -> Product Name: "Augustiner Hell", Pack: 20, Vol: 50cl.
+    - QUANTITY: The first column (e.g. 45.00) is the Quantity.
+    """,
+
     "Simple Things Fermentations": """
     - PREFIX REMOVAL: Remove start codes like "30EK", "9G", "12x 440".
     - COLLABORATION: 
@@ -132,20 +145,19 @@ SUPPLIER_RULEBOOK = {
     
     "Polly's Brew Co.": """
     - PRODUCT NAME: Stop extracting at the first hyphen (-).
-      Example: "Rivers of Green - Pale Ale" -> Product Name: "Rivers Of Green".
     - PACK SIZE: Watch for 18-packs.
     """,
     
     "North Riding Brewery": """
     - DISCOUNT: Handle '(discount)' line item (negative total). 
-      Divide total discount by count of beer units. Subtract this amount from the Unit Price.
+      Divide total discount by count of beer units. Subtract from Unit Price.
     """,
     
     "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions."
 }
 
 # ==========================================
-# 4. DATA PROCESSING FUNCTIONS
+# 4. DATA PROCESSING
 # ==========================================
 
 def create_product_matrix(df):
@@ -164,7 +176,6 @@ def create_product_matrix(df):
             'Product_Name': name[2],
             'ABV': name[3]
         }
-        # Add formats (Limit to 3)
         for i, (_, item) in enumerate(group.iterrows()):
             if i >= 3: break
             suffix = str(i + 1)
@@ -176,7 +187,6 @@ def create_product_matrix(df):
         
     matrix_df = pd.DataFrame(matrix_rows)
     
-    # Clean Column Order
     base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     format_cols = []
     for i in range(1, 4):
@@ -186,10 +196,9 @@ def create_product_matrix(df):
     return matrix_df[final_cols]
 
 # ==========================================
-# 5. MAIN APPLICATION
+# 5. MAIN APP
 # ==========================================
 
-# Initialize State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -202,7 +211,6 @@ with st.sidebar:
 st.subheader("1. Upload Invoice")
 uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
 
-# Reset on new file
 if uploaded_file:
     if 'last_uploaded_file' not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
         st.session_state.header_data = None
@@ -232,7 +240,7 @@ if uploaded_file and api_key:
                         "Payable_To": "Supplier Name",
                         "Invoice_Number": "12345",
                         "Issue_Date": "DD/MM/YYYY",
-                        "Payment_Terms": "e.g. 30 Days",
+                        "Payment_Terms": "String",
                         "Due_Date": "DD/MM/YYYY",
                         "Total_Net": 100.00,
                         "Total_VAT": 20.00,
@@ -270,22 +278,22 @@ if uploaded_file and api_key:
                 json_text = response.text.strip().replace("```json", "").replace("```", "")
                 data = json.loads(json_text)
                 
-                # Process Header
+                # Header
                 st.session_state.header_data = pd.DataFrame([data['header']])
                 
-                # Process Lines
+                # Lines
                 df_lines = pd.DataFrame(data['line_items'])
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing_cols = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing_cols]
 
-                # Process Matrix
+                # Matrix
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
 
         except Exception as e:
             st.error(f"Error: {e}")
 
-# Display Results using Tabs
+# Results
 if st.session_state.header_data is not None:
     st.divider()
     
