@@ -94,6 +94,7 @@ GLOBAL_RULES_TEXT = f"""
 3. **FINANCIALS**: 
    - **Item_Price**: Price per PURCHASE UNIT (Case/Keg). DO NOT divide by pack size.
    - **Landed Cost**: IF delivery charge exists: (Total Delivery Charge / Total Units) + Item Price.
+   - **Discount**: IF line items discount exists: apply to cost price. IF total discount applies, calculate percentage and apply to line items cost price.
 
 4. **FILTERING**:
    - Exclude "pump clip", "badge", "foamex" ONLY IF price is 0.00.
