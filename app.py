@@ -89,25 +89,32 @@ Cellar Equipment | 250 Pack
 
 GLOBAL_RULES_TEXT = f"""
 1. **PRODUCT NAMES & COLLABORATORS**:
-   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft"). Extract partner.
-   - **Product Name**: Extract core beer name ONLY. Remove size info, prefixes, and collaborator.
-   - **Styles**: Remove generic styles (IPA, Stout) unless it is the only name.
-   - **Title Case**: Convert Product Name to Title Case.
+   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft", "Polly's x Cloudwater"). Extract the partner name into the "Collaborator" field.
+   - **Product Name**: Extract the core beer name ONLY. 
+     - **CLEANING**: Remove size info (e.g. "12x500ml"), prefixes (e.g. "SRM-", "30EK"), and the collaborator name.
+   - **Styles**: Remove generic style descriptors (IPA, Stout, Pale Ale) from the name unless it is the ONLY name.
+   - **Title Case**: Convert Product Name to Title Case (e.g. "DARK ISLAND" -> "Dark Island").
 
 2. **STRICT FORMAT MAPPING**:
-   - Map items to "VALID FORMATS LIST".
-   - **KEGSTAR / eKEG Logic**: IF size is "41L" -> Cask 9 Gallon. ELSE -> Steel Keg.
-   - Convert ml to cl. L/Ltr to Litre.
+   - Map every item to the "VALID FORMATS LIST" below.
+   - **KEGSTAR / eKEG Logic**:
+     - IF description contains "Kegstar" OR "eKeg":
+       - CHECK SIZE: If size is "41L" or "41 Litre" -> Map to Format: "Cask", Volume: "9 Gallon".
+       - ELSE (e.g. 30L, 50L) -> Map to Format: "Steel Keg" (preserve volume).
+   - **LSS Logic**: "LSS" usually means "Litre Stainless Steel". Map to "Steel Keg".
+   - Convert ml to cl (e.g. 440ml -> 44cl, 500ml -> 50cl).
+   - Convert L/Ltr -> Litre.
 
 3. **Pack Size vs Quantity**:
-   - **Pack_Size**: Items per case (e.g. 12, 24). Blank for Kegs.
-   - **Quantity**: Units ordered.
+   - **Pack_Size**: How many items inside a case (e.g. 12, 18, 24). Blank for Kegs.
+   - **Quantity**: The number of units ordered (e.g. 5 kegs, or 10 cases).
 
 4. **FINANCIALS (LANDED COST)**: 
-   - **Base Price**: Calculate NET price per single unit (after line discounts).
+   - **Item_Price Definition**: The NET price for ONE PURCHASE UNIT (e.g. One Keg, One Case). 
+     - **DO NOT** divide the price by the Pack Size. If a case costs £40, the Item_Price is £40.
    - **Shipping Allocation**: IF there is a total "Delivery" or "Shipping" charge on the invoice:
      1. Sum the TOTAL QUANTITY of beer units (kegs + cases).
-     2. Divide the Delivery Charge by this Total Quantity.
+     2. Divide the Delivery Charge by this Total Quantity to get "Shipping Per Unit".
      3. ADD this amount to the 'Item_Price' of every line.
 
 5. **FILTERING (SMART REMOVAL)**:
