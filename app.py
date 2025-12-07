@@ -56,6 +56,18 @@ with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
     st.info("Logic loaded from `knowledge_base.py`")
+    
+    st.divider()
+    
+    # --- THE LAB (EDGE CASE FIXER) ---
+    st.subheader("🧪 The Lab (Fix Edge Cases)")
+    st.caption("Use this to test new rules without changing the code. If it works, send the rule to the developer.")
+    
+    custom_rule = st.text_area(
+        "Inject Temporary Rule:", 
+        placeholder="e.g. 'LSS' means Steel Keg\ne.g. Remove 'ABC-' from product name",
+        height=150
+    )
 
 # --- FILE UPLOADER ---
 st.subheader("1. Upload Invoice")
@@ -82,6 +94,16 @@ if uploaded_file and api_key:
                 full_text = ""
                 for img in images:
                     full_text += pytesseract.image_to_string(img) + "\n"
+
+                # Inject Custom Rule if present
+                injected_rules = ""
+                if custom_rule:
+                    injected_rules = f"""
+                    ---------------------------------------------------
+                    !!! URGENT USER OVERRIDE - APPLY THIS LOGIC FIRST !!!
+                    {custom_rule}
+                    ---------------------------------------------------
+                    """
 
                 prompt = f"""
                 You are a financial data expert. Extract data to JSON.
@@ -121,6 +143,8 @@ if uploaded_file and api_key:
                 GLOBAL RULES:
                 {GLOBAL_RULES_TEXT}
                 
+                {injected_rules}
+                
                 Return ONLY valid JSON.
                 
                 INVOICE TEXT:
@@ -148,6 +172,14 @@ if uploaded_file and api_key:
 
 # --- DISPLAY RESULTS ---
 if st.session_state.header_data is not None:
+    
+    # SUCCESS MESSAGE FOR CUSTOM RULES
+    if custom_rule:
+        st.success("✅ Processed using Custom Rules from The Lab")
+        with st.expander("📩 Copy this logic for the Developer"):
+            st.text("Please add the following rule to knowledge_base.py:")
+            st.code(custom_rule, language="text")
+
     st.divider()
     
     tab1, tab2, tab3 = st.tabs(["📄 Header Data", "📝 Line Items", "📊 Product Matrix"])
