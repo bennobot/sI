@@ -116,6 +116,10 @@ VALID FORMATS LIST:
 # 3. SUPPLIER SPECIFIC RULEBOOK
 # ==========================================
 SUPPLIER_RULEBOOK = {
+
+   "Trenchmore LLP": """
+   with Tenchmore LLP the Supplier for the products is always Silly Moo Cider
+   """,
    
    "Pilton Cider Ltd": """
    For Pilton Cider Ltd
