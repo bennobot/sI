@@ -118,7 +118,8 @@ VALID FORMATS LIST:
 SUPPLIER_RULEBOOK = {
 
    "Trenchmore LLP": """
-   with Tenchmore LLP the Supplier for the products is always Silly Moo Cider
+   - with Tenchmore LLP the Supplier for the products is always Silly Moo Cider
+   - the product name contains the name Silly Moo which needs to be removed
    """,
    
    "Pilton Cider Ltd": """
