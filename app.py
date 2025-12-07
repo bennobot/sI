@@ -109,9 +109,9 @@ GLOBAL_RULES_TEXT = f"""
    - Convert ml to cl (e.g. 440ml -> 44cl).
    - Convert L/Ltr -> Litre.
 
-3. **Pack Size**:
-   - Bottles/Cans: Extract pack count.
-   - Kegs/Casks: Leave blank/null.
+3. **Pack Size vs Quantity**:
+   - **Pack_Size**: How many items inside a case (e.g. 12, 18, 24). Blank for Kegs.
+   - **Quantity**: The number of units ordered (e.g. 5 kegs, or 10 cases).
 
 4. **Item_Price**: 
    - NET price per single unit (per keg or per case).
@@ -199,7 +199,7 @@ if uploaded_file and api_key:
                 {GLOBAL_RULES_TEXT}
                 
                 COLUMNS TO EXTRACT:
-                "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price" (Net).
+                "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Quantity", "Item_Price" (Net).
                 
                 Return ONLY valid JSON.
                 
@@ -215,7 +215,7 @@ if uploaded_file and api_key:
                 df = pd.DataFrame(data)
                 
                 # Column Ordering
-                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price"]
+                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Quantity", "Item_Price"]
                 existing_cols = [c for c in cols if c in df.columns]
                 st.session_state.processed_data = df[existing_cols]
 
