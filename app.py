@@ -6,7 +6,7 @@ import google.generativeai as genai
 import json
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
-st.title("Brewery Invoice Parser ⚡ (Wholesaler + Matrix)")
+st.title("Brewery Invoice Parser ⚡ (Smart Filtering)")
 
 # ==========================================
 # 1. MASTER DATA
@@ -84,56 +84,52 @@ Cellar Equipment | 250 Pack
 """
 
 # ==========================================
-# 2. GLOBAL RULES
+# 2. GLOBAL RULES (Updated)
 # ==========================================
 
 GLOBAL_RULES_TEXT = f"""
 1. **PRODUCT NAMES & COLLABORATORS**:
-   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft"). Extract the partner into "Collaborator".
-   - **Product Name**: Extract the core beer name ONLY. Remove size info, prefixes, and collaborator.
-   - **Styles**: Remove generic style descriptors (IPA, Stout) unless it is the ONLY name.
+   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft"). Extract partner.
+   - **Product Name**: Extract core beer name ONLY. Remove size info, prefixes, and collaborator.
+   - **Styles**: Remove generic styles (IPA, Stout) unless it is the only name.
    - **Title Case**: Convert Product Name to Title Case.
 
 2. **STRICT FORMAT MAPPING**:
-   - Map every item to the "VALID FORMATS LIST" below.
-   - **KEGSTAR / eKEG Logic**:
-     - IF description contains "Kegstar" OR "eKeg":
-       - CHECK SIZE: If size is "41L" or "41 Litre" -> Map to Format: "Cask", Volume: "9 Gallon".
-       - ELSE (e.g. 30L, 50L) -> Map to Format: "Steel Keg" (preserve volume).
-   - Convert ml to cl (e.g. 440ml -> 44cl).
-   - Convert L/Ltr -> Litre.
+   - Map items to "VALID FORMATS LIST".
+   - **KEGSTAR / eKEG Logic**: IF size is "41L" -> Cask 9 Gallon. ELSE -> Steel Keg.
+   - Convert ml to cl. L/Ltr to Litre.
 
 3. **Pack Size vs Quantity**:
    - **Pack_Size**: Items per case (e.g. 12, 24). Blank for Kegs.
    - **Quantity**: Units ordered.
 
-4. **Item_Price**: NET price per single unit. Apply discounts.
+4. **FINANCIALS (LANDED COST)**: 
+   - **Base Price**: Calculate NET price per single unit (after line discounts).
+   - **Shipping Allocation**: IF there is a total "Delivery" or "Shipping" charge on the invoice:
+     1. Sum the TOTAL QUANTITY of beer units (kegs + cases).
+     2. Divide the Delivery Charge by this Total Quantity.
+     3. ADD this amount to the 'Item_Price' of every line.
+
+5. **FILTERING (SMART REMOVAL)**:
+   - **POS Materials**: Look for keywords: "pump clip", "clip", "badge", "font badge", "foamex".
+     - **RULE**: EXCLUDE these lines **ONLY IF** the Item Price/Total is 0.00. 
+     - If they have a cost > 0.00, KEEP them.
+   - **Zero Value Items**: If a line is 0.00, EXCLUDE it unless it is explicitly "Bonus Stock" or "Samples" of beer.
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
 """
 
 # ==========================================
-# 3. SUPPLIER RULEBOOK (Advanced Wholesaler Logic)
+# 3. SUPPLIER RULEBOOK
 # ==========================================
 
 SUPPLIER_RULEBOOK = {
-    "James Clay and Sons": """
-    - TYPE: Wholesaler. The Invoice Header says 'James Clay', but the line items are from various breweries.
-    - STRATEGY: You must SPLIT the Description into 'Supplier_Name' and 'Product_Name' using your internal knowledge of beer brands.
-    - RULES:
-      1. **Supplier_Name**: Identify the actual Brewer/Brand (e.g. "Augustiner", "Duvel", "Brasserie Lefebvre").
-         - If the brand is missing (e.g. "Blanche de Bruxelles"), infer it (e.g. "Brasserie Lefebvre").
-      2. **Product_Name**: The remaining part of the beer name (e.g. "Hell", "Pils", "Vintage 2023").
-      3. **Pack/Vol**: Extract from the "NxVol" pattern (e.g. 20x50cl).
-    - EXAMPLE: 
-      Input: "Augustiner Hell 20x50cl NRB"
-      Output: Supplier="Augustiner-Brau", Product="Hell", Pack=20, Vol=50cl.
-    """,
-
     "Simple Things Fermentations": """
-    - PREFIX REMOVAL: Remove start codes like "30EK", "9G".
-    - COLLABORATION: Look for "STF/[Partner]". If "STF/Croft 3", Collaborator is "Croft 3".
+    - PREFIX REMOVAL: Remove start codes like "30EK", "9G", "12x 440".
+    - COLLABORATION: 
+      1. Look for "STF/[Partner]".
+      2. EXCEPTION: If text is "STF/Croft 3...", the Collaborator is "Croft 3".
     - CODE MAPPING: "30EK"->EcoKeg 30 Litre; "9G"->Cask 9 Gallon.
     - DISCOUNT: Apply 15% discount.
     """,
@@ -142,7 +138,12 @@ SUPPLIER_RULEBOOK = {
     
     "North Riding Brewery": "DISCOUNT: Handle '(discount)' line item (negative total). Divide by units.",
     
-    "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions."
+    "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions.",
+    
+    "James Clay and Sons": """
+    - STRATEGY: Split Description into Supplier/Product.
+    - PATTERN: "NxVol" (e.g. 20x50cl).
+    """
 }
 
 # ==========================================
@@ -153,7 +154,6 @@ def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
     
-    # Group by the TRUE Supplier (Brewer) and Product
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     grouped = df.groupby(group_cols)
     
@@ -195,7 +195,7 @@ if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
 with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
-    st.info("Auto-detects supplier. Infers Wholesaler Brands.")
+    st.info("Auto-detects supplier. Outputs Header, Lines, and Matrix.")
 
 st.subheader("1. Upload Invoice")
 uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
@@ -234,11 +234,12 @@ if uploaded_file and api_key:
                         "Total_Net": 0.00,
                         "Total_VAT": 0.00,
                         "Total_Gross": 0.00,
-                        "Total_Discount_Amount": 0.00
+                        "Total_Discount_Amount": 0.00,
+                        "Shipping_Charge": 0.00
                     }},
                     "line_items": [
                         {{
-                            "Supplier_Name": "BREWERY Name (Not Wholesaler)",
+                            "Supplier_Name": "...",
                             "Collaborator": "...",
                             "Product_Name": "...",
                             "ABV": "...",
@@ -291,7 +292,7 @@ if st.session_state.header_data is not None:
         st.download_button("📥 Download Header CSV", csv_head, "invoice_header.csv", "text/csv")
         
     with tab2:
-        st.subheader("Line Items (Supplier = Brewery)")
+        st.subheader("Line Items (Landed Cost Applied)")
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", use_container_width=True)
         csv_lines = edited_lines.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Lines CSV", csv_lines, "invoice_lines.csv", "text/csv")
