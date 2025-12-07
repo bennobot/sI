@@ -214,8 +214,8 @@ if uploaded_file and api_key:
                 
                 df = pd.DataFrame(data)
                 
-                # Column Ordering
-                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Quantity", "Item_Price"]
+                # Column Ordering (Quantity moved to end)
+                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing_cols = [c for c in cols if c in df.columns]
                 st.session_state.processed_data = df[existing_cols]
 
