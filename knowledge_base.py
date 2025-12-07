@@ -107,6 +107,13 @@ VALID FORMATS LIST:
 # 3. SUPPLIER SPECIFIC RULEBOOK
 # ==========================================
 SUPPLIER_RULEBOOK = {
+   
+   "Pilton Cider Ltd": """
+   For Pilton Cider Ltd
+   when the bottle size is 33cl convert the item line to pack size 12 and calculate the item_price and quantity accordingly
+   when the size is 75cl pack size of 1 is correct
+   """,
+   
     "DEYA Brewing Company": """
     - FORMAT: "LSS" means "Litre Stainless Steel" -> Map to Steel Keg.
     - CANS: 500mL cans should be mapped to Volume: 50cl.
@@ -134,6 +141,5 @@ SUPPLIER_RULEBOOK = {
    - The Supplier_Name is part of the Product_Name e.g. Rothaus Pils - Rothaus is the supplier - Pils is the Product_Name
    - The format will always be bottles, unless it is keg then it is always steel keg
    - Payable to is German Drinks Company Limited
-
-""",
+   """
 }
