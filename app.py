@@ -6,7 +6,7 @@ import google.generativeai as genai
 import json
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
-st.title("Brewery Invoice Parser ⚡ (Wholesaler Support)")
+st.title("Brewery Invoice Parser ⚡ (Wholesaler + Matrix)")
 
 # ==========================================
 # 1. MASTER DATA
@@ -89,10 +89,10 @@ Cellar Equipment | 250 Pack
 
 GLOBAL_RULES_TEXT = f"""
 1. **PRODUCT NAMES & COLLABORATORS**:
-   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft", "Polly's x Cloudwater"). Extract the partner name into the "Collaborator" field.
-   - **Product Name**: Extract the core beer name ONLY. Remove size info, prefixes, and the collaborator name.
-   - **Styles**: Remove generic style descriptors (IPA, Stout, Pale Ale) from the name unless it is the ONLY name.
-   - **Title Case**: Convert Product Name to Title Case (e.g. "DARK ISLAND" -> "Dark Island").
+   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft"). Extract the partner into "Collaborator".
+   - **Product Name**: Extract the core beer name ONLY. Remove size info, prefixes, and collaborator.
+   - **Styles**: Remove generic style descriptors (IPA, Stout) unless it is the ONLY name.
+   - **Title Case**: Convert Product Name to Title Case.
 
 2. **STRICT FORMAT MAPPING**:
    - Map every item to the "VALID FORMATS LIST" below.
@@ -104,67 +104,56 @@ GLOBAL_RULES_TEXT = f"""
    - Convert L/Ltr -> Litre.
 
 3. **Pack Size vs Quantity**:
-   - **Pack_Size**: How many items inside a case (e.g. 12, 18, 24). Blank for Kegs.
-   - **Quantity**: The number of units ordered (e.g. 5 kegs, or 10 cases).
+   - **Pack_Size**: Items per case (e.g. 12, 24). Blank for Kegs.
+   - **Quantity**: Units ordered.
 
-4. **FINANCIALS**: 
-   - **Item_Price**: NET price per single unit (per keg or per case).
-   - **Header Totals**: Extract Net, VAT, Gross.
-   - **Total Discount**: Extract if present.
+4. **Item_Price**: NET price per single unit. Apply discounts.
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
 """
 
 # ==========================================
-# 3. SUPPLIER RULEBOOK (Wholesaler Logic Added)
+# 3. SUPPLIER RULEBOOK (Advanced Wholesaler Logic)
 # ==========================================
 
 SUPPLIER_RULEBOOK = {
     "James Clay and Sons": """
-    - PARSING STRATEGY: This is a wholesaler invoice. The Description column combines Name, Pack Size, and Volume.
-    - PATTERN MATCHING: Look for the pattern "NxVol" (e.g. "20x50cl", "12x33cl", "24x44cl").
-      - The number BEFORE 'x' is the Pack_Size.
-      - The volume AFTER 'x' is the Volume.
-    - FORMAT LOGIC: 
-      - If text contains "btls" or "NRB" -> Format: "Bottles".
-      - If text contains "cans" -> Format: "Cans".
-    - PRODUCT NAME: Everything *before* the pack size pattern is the Product Name.
-      - Example: "Augustiner Hell 20x50cl NRB" -> Product Name: "Augustiner Hell", Pack: 20, Vol: 50cl.
-    - QUANTITY: The first column (e.g. 45.00) is the Quantity.
+    - TYPE: Wholesaler. The Invoice Header says 'James Clay', but the line items are from various breweries.
+    - STRATEGY: You must SPLIT the Description into 'Supplier_Name' and 'Product_Name' using your internal knowledge of beer brands.
+    - RULES:
+      1. **Supplier_Name**: Identify the actual Brewer/Brand (e.g. "Augustiner", "Duvel", "Brasserie Lefebvre").
+         - If the brand is missing (e.g. "Blanche de Bruxelles"), infer it (e.g. "Brasserie Lefebvre").
+      2. **Product_Name**: The remaining part of the beer name (e.g. "Hell", "Pils", "Vintage 2023").
+      3. **Pack/Vol**: Extract from the "NxVol" pattern (e.g. 20x50cl).
+    - EXAMPLE: 
+      Input: "Augustiner Hell 20x50cl NRB"
+      Output: Supplier="Augustiner-Brau", Product="Hell", Pack=20, Vol=50cl.
     """,
 
     "Simple Things Fermentations": """
-    - PREFIX REMOVAL: Remove start codes like "30EK", "9G", "12x 440".
-    - COLLABORATION: 
-      1. Look for "STF/[Partner]".
-      2. EXCEPTION: If text is "STF/Croft 3...", the Collaborator is "Croft 3".
+    - PREFIX REMOVAL: Remove start codes like "30EK", "9G".
+    - COLLABORATION: Look for "STF/[Partner]". If "STF/Croft 3", Collaborator is "Croft 3".
     - CODE MAPPING: "30EK"->EcoKeg 30 Litre; "9G"->Cask 9 Gallon.
     - DISCOUNT: Apply 15% discount.
     """,
     
-    "Polly's Brew Co.": """
-    - PRODUCT NAME: Stop extracting at the first hyphen (-).
-    - PACK SIZE: Watch for 18-packs.
-    """,
+    "Polly's Brew Co.": "PRODUCT NAME: Stop at first hyphen. Watch for 18-packs.",
     
-    "North Riding Brewery": """
-    - DISCOUNT: Handle '(discount)' line item (negative total). 
-      Divide total discount by count of beer units. Subtract from Unit Price.
-    """,
+    "North Riding Brewery": "DISCOUNT: Handle '(discount)' line item (negative total). Divide by units.",
     
     "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions."
 }
 
 # ==========================================
-# 4. DATA PROCESSING
+# 4. PROCESSING FUNCTIONS
 # ==========================================
 
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
     
-    # Group by Product Identity
+    # Group by the TRUE Supplier (Brewer) and Product
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     grouped = df.groupby(group_cols)
     
@@ -206,7 +195,7 @@ if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
 with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
-    st.info("Auto-detects supplier. Outputs Header, Lines, and Matrix.")
+    st.info("Auto-detects supplier. Infers Wholesaler Brands.")
 
 st.subheader("1. Upload Invoice")
 uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
@@ -232,32 +221,32 @@ if uploaded_file and api_key:
                     full_text += pytesseract.image_to_string(img) + "\n"
 
                 prompt = f"""
-                You are a financial data extractor. Extract data into a nested JSON structure.
+                You are a financial data expert. Extract data to JSON.
                 
-                STRUCTURE REQUIRED:
+                STRUCTURE:
                 {{
                     "header": {{
-                        "Payable_To": "Supplier Name",
-                        "Invoice_Number": "12345",
-                        "Issue_Date": "DD/MM/YYYY",
-                        "Payment_Terms": "String",
-                        "Due_Date": "DD/MM/YYYY",
-                        "Total_Net": 100.00,
-                        "Total_VAT": 20.00,
-                        "Total_Gross": 120.00,
+                        "Payable_To": "Name on Invoice Header",
+                        "Invoice_Number": "...",
+                        "Issue_Date": "...",
+                        "Payment_Terms": "...",
+                        "Due_Date": "...",
+                        "Total_Net": 0.00,
+                        "Total_VAT": 0.00,
+                        "Total_Gross": 0.00,
                         "Total_Discount_Amount": 0.00
                     }},
                     "line_items": [
                         {{
-                            "Supplier_Name": "...",
+                            "Supplier_Name": "BREWERY Name (Not Wholesaler)",
                             "Collaborator": "...",
                             "Product_Name": "...",
                             "ABV": "...",
                             "Format": "...",
                             "Pack_Size": "...",
                             "Volume": "...",
-                            "Quantity": 10,
-                            "Item_Price": 50.00
+                            "Quantity": 1,
+                            "Item_Price": 10.00
                         }}
                     ]
                 }}
@@ -278,22 +267,18 @@ if uploaded_file and api_key:
                 json_text = response.text.strip().replace("```json", "").replace("```", "")
                 data = json.loads(json_text)
                 
-                # Header
                 st.session_state.header_data = pd.DataFrame([data['header']])
                 
-                # Lines
                 df_lines = pd.DataFrame(data['line_items'])
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing_cols = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing_cols]
 
-                # Matrix
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
 
         except Exception as e:
             st.error(f"Error: {e}")
 
-# Results
 if st.session_state.header_data is not None:
     st.divider()
     
@@ -306,7 +291,7 @@ if st.session_state.header_data is not None:
         st.download_button("📥 Download Header CSV", csv_head, "invoice_header.csv", "text/csv")
         
     with tab2:
-        st.subheader("Line Items")
+        st.subheader("Line Items (Supplier = Brewery)")
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", use_container_width=True)
         csv_lines = edited_lines.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Lines CSV", csv_lines, "invoice_lines.csv", "text/csv")
