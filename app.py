@@ -4,19 +4,13 @@ from pdf2image import convert_from_bytes
 import pytesseract
 import google.generativeai as genai
 import json
-import os
-
-# --- 1. SAFE IMPORT FOR SHEETS ---
-try:
-    from streamlit_gsheets import GSheetsConnection
-    SHEETS_AVAILABLE = True
-except ImportError:
-    SHEETS_AVAILABLE = False
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
-st.title("Brewery Invoice Parser ⚡")
+st.title("Brewery Invoice Parser ⚡ (GitOps Mode)")
 
-# --- 2. CONFIGURATION: MASTER DATA ---
+# ==========================================
+# 1. MASTER DATA (The Valid List)
+# ==========================================
 
 VALID_FORMATS = """
 Cask | 9 Gallon
@@ -89,113 +83,97 @@ US Dolium Keg | 20 Litre
 Cellar Equipment | 250 Pack
 """
 
+# ==========================================
+# 2. GLOBAL RULES (Applies to everyone)
+# ==========================================
+
 GLOBAL_RULES_TEXT = f"""
 1. **PRODUCT NAMES & COLLABORATORS**:
-   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft"). Extract partner name.
-   - **Product Name**: Extract core beer name ONLY. Remove size info, prefixes, and collaborator.
-   - **Styles**: Remove generic styles (IPA, Stout) unless it is the only name.
-   - **Title Case**: Convert Product Name to Title Case.
+   - **Collaborator**: Look for names indicating a partnership (e.g. "STF/Croft", "Polly's x Cloudwater"). Extract the partner name into the "Collaborator" field.
+   - **Product Name**: Extract the core beer name ONLY. Remove size info, prefixes, and the collaborator name.
+   - **Styles**: Remove generic style descriptors (IPA, Stout, Pale Ale) from the name unless it is the ONLY name.
+   - **Title Case**: Convert Product Name to Title Case (e.g. "DARK ISLAND" -> "Dark Island").
 
 2. **STRICT FORMAT MAPPING**:
-   - Map items to "VALID FORMATS LIST".
-   - **Kegstar / eKeg**: IF size is "41L" -> Cask 9 Gallon. ELSE -> Steel Keg.
-   - Convert ml to cl. L/Ltr to Litre.
+   - Map every item to the "VALID FORMATS LIST" below.
+   
+   **SPECIFIC KEG/CASK RULES:**
+   - "Firkin" -> "Cask" / "9 Gallon".
+   - "Pin" -> "Cask" / "4.5 Gallon".
+   - **KEGSTAR / eKEG Logic**:
+     - IF description contains "Kegstar" OR "eKeg":
+       - CHECK SIZE: If size is "41L" or "41 Litre" -> Map to Format: "Cask", Volume: "9 Gallon".
+       - ELSE (e.g. 30L, 50L) -> Map to Format: "Steel Keg" (preserve volume).
 
-3. **Pack Size**: Bottles/Cans=Count. Kegs=Null.
+   **UNIT CONVERSIONS:**
+   - Convert ml to cl (e.g. 440ml -> 44cl).
+   - Convert L/Ltr -> Litre.
 
-4. **Item_Price**: NET price per single unit.
+3. **Pack Size**:
+   - Bottles/Cans: Extract pack count.
+   - Kegs/Casks: Leave blank/null.
+
+4. **Item_Price**: 
+   - NET price per single unit (per keg or per case).
+   - Apply line-item discounts.
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
 """
 
-# --- 3. LOGIC MANAGER (Cloud or Local) ---
+# ==========================================
+# 3. SUPPLIER SPECIFIC RULES (Hard-Coded)
+# ==========================================
+# To add a new supplier, just add a new line to this dictionary.
 
-DEFAULT_SUPPLIER_RULES = {
+SUPPLIER_RULES = {
     "Generic / Unknown": "Use standard global logic.",
-    "Simple Things Fermentations": "PREFIX REMOVAL: Remove codes like '30EK'. COLLABORATION: Look for 'STF/Partner'. DISCOUNT: 15%.",
-    "Polly's Brew Co.": "PRODUCT NAME: Stop at first hyphen. Handle 18-packs.",
-    "North Riding Brewery": "DISCOUNT: Handle '(discount)' line item (negative total). Divide by units.",
+    
+    "Simple Things Fermentations": """
+    - PREFIX REMOVAL: Remove start codes like "30EK", "9G", "12x 440".
+    - COLLABORATION: 
+      1. Look for "STF/[Partner]".
+      2. EXCEPTION: If text is "STF/Croft 3...", the Collaborator is "Croft 3" (not just Croft).
+    - CODE MAPPING: "30EK"->EcoKeg 30 Litre; "9G"->Cask 9 Gallon.
+    - DISCOUNT: Apply 15% discount.
+    """,
+    
+    "Polly's Brew Co.": """
+    - PRODUCT NAME: Stop extracting at the first hyphen (-).
+      Example: "Rivers of Green - Pale Ale" -> Product Name: "Rivers Of Green".
+    - PACK SIZE: Watch for 18-packs (e.g. 18 x 440ml).
+    """,
+    
+    "North Riding Brewery": """
+    - DISCOUNT: Handle '(discount)' line item (negative total). 
+      Divide total discount by count of beer units. Subtract this amount from the Unit Price.
+    """,
+    
     "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions."
 }
 
-def load_rules():
-    # Try Cloud first
-    if SHEETS_AVAILABLE:
-        try:
-            conn = st.connection("gsheets", type=GSheetsConnection)
-            df = conn.read(worksheet="Rules", ttl=0)
-            return pd.Series(df.Rules.values, index=df.Supplier).to_dict()
-        except Exception:
-            pass # Fail silently to Local
-            
-    # Fallback to Local
-    if os.path.exists("rules.json"):
-        with open("rules.json", "r") as f:
-            return json.load(f)
-            
-    return DEFAULT_SUPPLIER_RULES.copy()
+# ==========================================
+# 4. MAIN APPLICATION
+# ==========================================
 
-def save_rules(supplier, text):
-    # Try Cloud
-    if SHEETS_AVAILABLE:
-        try:
-            conn = st.connection("gsheets", type=GSheetsConnection)
-            df = conn.read(worksheet="Rules", ttl=0)
-            if supplier in df['Supplier'].values:
-                df.loc[df['Supplier'] == supplier, 'Rules'] = text
-            else:
-                new_row = pd.DataFrame([{"Supplier": supplier, "Rules": text}])
-                df = pd.concat([df, new_row], ignore_index=True)
-            conn.update(worksheet="Rules", data=df)
-            st.cache_data.clear()
-            st.toast("Saved to Cloud!")
-            return
-        except Exception:
-            st.warning("Cloud save failed. Saving locally.")
-
-    # Fallback Local
-    current_rules = st.session_state.rules
-    current_rules[supplier] = text
-    with open("rules.json", "w") as f:
-        json.dump(current_rules, f, indent=4)
-    st.toast("Saved locally.")
-
-if 'rules' not in st.session_state:
-    st.session_state.rules = load_rules()
-
-# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
     
-    st.divider()
+    st.markdown("---")
+    st.subheader("Select Supplier Logic")
+    # This reads directly from the hard-coded dictionary above
+    selected_supplier = st.selectbox("Supplier", list(SUPPLIER_RULES.keys()))
     
-    if not SHEETS_AVAILABLE:
-        st.warning("⚠️ Cloud Database disabled (Library missing or connection failed). Using Local Mode.")
-    
-    # Supplier Selection
-    supplier_options = list(st.session_state.rules.keys())
-    if "Generic / Unknown" not in supplier_options:
-        supplier_options.insert(0, "Generic / Unknown")
-        
-    selected_supplier = st.selectbox("Select Supplier", supplier_options)
-    
-    # Edit Rules
-    current_text = st.session_state.rules.get(selected_supplier, "")
-    updated_text = st.text_area("Edit Rules:", value=current_text, height=150)
-    
-    if st.button("💾 Update Rules"):
-        st.session_state.rules[selected_supplier] = updated_text
-        save_rules(selected_supplier, updated_text)
+    st.info(f"**Active Rules:**\n{SUPPLIER_RULES[selected_supplier]}")
 
-# --- 5. MAIN APP (THE UPLOADER) ---
 st.subheader("1. Upload Invoice")
 uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
 
 if uploaded_file and api_key:
     try:
         genai.configure(api_key=api_key)
+        # Using the latest model you confirmed works
         model = genai.GenerativeModel('models/gemini-2.5-flash')
         
         with st.spinner("OCR Scanning..."):
@@ -205,7 +183,7 @@ if uploaded_file and api_key:
                 full_text += pytesseract.image_to_string(img) + "\n"
 
         # Construct Prompt
-        active_rules = st.session_state.rules.get(selected_supplier, "")
+        active_rules = SUPPLIER_RULES[selected_supplier]
         
         prompt = f"""
         Extract invoice line items into a JSON list.
@@ -232,7 +210,7 @@ if uploaded_file and api_key:
             
             df = pd.DataFrame(data)
             
-            # Ordering
+            # Column Ordering
             cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price"]
             existing_cols = [c for c in cols if c in df.columns]
             df = df[existing_cols]
