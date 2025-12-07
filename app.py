@@ -6,10 +6,10 @@ import google.generativeai as genai
 import json
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
-st.title("Brewery Invoice Parser ⚡ (GitOps Mode)")
+st.title("Brewery Invoice Parser ⚡ (Auto-Detect)")
 
 # ==========================================
-# 1. MASTER DATA (The Valid List)
+# 1. MASTER DATA
 # ==========================================
 
 VALID_FORMATS = """
@@ -84,7 +84,7 @@ Cellar Equipment | 250 Pack
 """
 
 # ==========================================
-# 2. GLOBAL RULES (Applies to everyone)
+# 2. GLOBAL RULES
 # ==========================================
 
 GLOBAL_RULES_TEXT = f"""
@@ -122,17 +122,15 @@ VALID FORMATS LIST:
 """
 
 # ==========================================
-# 3. SUPPLIER SPECIFIC RULES
+# 3. THE RULEBOOK (Passed entirely to AI)
 # ==========================================
 
-SUPPLIER_RULES = {
-    "Generic / Unknown": "Use standard global logic.",
-    
+SUPPLIER_RULEBOOK = {
     "Simple Things Fermentations": """
     - PREFIX REMOVAL: Remove start codes like "30EK", "9G", "12x 440".
     - COLLABORATION: 
       1. Look for "STF/[Partner]".
-      2. EXCEPTION: If text is "STF/Croft 3...", the Collaborator is "Croft 3" (not just Croft).
+      2. EXCEPTION: If text is "STF/Croft 3...", the Collaborator is "Croft 3".
     - CODE MAPPING: "30EK"->EcoKeg 30 Litre; "9G"->Cask 9 Gallon.
     - DISCOUNT: Apply 15% discount.
     """,
@@ -155,37 +153,29 @@ SUPPLIER_RULES = {
 # 4. MAIN APPLICATION
 # ==========================================
 
-# Initialize session state to hold data across re-runs
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
 
 with st.sidebar:
     st.header("Settings")
     api_key = st.text_input("Google API Key", type="password")
-    
-    st.markdown("---")
-    st.subheader("Select Supplier Logic")
-    selected_supplier = st.selectbox("Supplier", list(SUPPLIER_RULES.keys()))
-    
-    st.info(f"**Active Rules:**\n{SUPPLIER_RULES[selected_supplier]}")
+    st.info("The AI will automatically detect the supplier from the invoice header and apply the correct rules from the Rulebook.")
 
 st.subheader("1. Upload Invoice")
 uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
 
-# Reset data if new file uploaded
 if uploaded_file:
     if 'last_uploaded_file' not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
         st.session_state.processed_data = None
         st.session_state.last_uploaded_file = uploaded_file.name
 
 if uploaded_file and api_key:
-    # THE PROCESS BUTTON
     if st.button("🚀 Process Invoice", type="primary"):
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('models/gemini-2.5-flash')
             
-            with st.spinner("OCR Scanning & AI Processing..."):
+            with st.spinner("OCR Scanning & Auto-Detecting Supplier..."):
                 # 1. OCR
                 uploaded_file.seek(0)
                 images = convert_from_bytes(uploaded_file.read(), dpi=300)
@@ -194,18 +184,22 @@ if uploaded_file and api_key:
                     full_text += pytesseract.image_to_string(img) + "\n"
 
                 # 2. AI Prompt
-                active_rules = SUPPLIER_RULES[selected_supplier]
                 prompt = f"""
-                Extract invoice line items into a JSON list.
+                You are a data entry expert. 
                 
-                COLUMNS TO EXTRACT:
-                "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price" (Net).
+                STEP 1: Identify the Supplier Name from the invoice text.
+                STEP 2: Check the "SUPPLIER RULEBOOK" below. If the supplier exists there, apply their specific rules.
+                STEP 3: Apply the "GLOBAL RULES".
+                STEP 4: Extract the line items into JSON.
+                
+                SUPPLIER RULEBOOK:
+                {json.dumps(SUPPLIER_RULEBOOK, indent=2)}
                 
                 GLOBAL RULES:
                 {GLOBAL_RULES_TEXT}
-
-                SUPPLIER SPECIFIC RULES:
-                {active_rules}
+                
+                COLUMNS TO EXTRACT:
+                "Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price" (Net).
                 
                 Return ONLY valid JSON.
                 
@@ -218,7 +212,6 @@ if uploaded_file and api_key:
                 json_text = response.text.strip().replace("```json", "").replace("```", "")
                 data = json.loads(json_text)
                 
-                # 4. Save to Session State
                 df = pd.DataFrame(data)
                 
                 # Column Ordering
@@ -229,15 +222,13 @@ if uploaded_file and api_key:
         except Exception as e:
             st.error(f"Error: {e}")
 
-# Display Logic (Outside the button, so it stays on screen)
+# Display Logic
 if st.session_state.processed_data is not None:
     st.divider()
     st.subheader("2. Extracted Data")
     
-    # Editable Dataframe
     edited_df = st.data_editor(st.session_state.processed_data, num_rows="dynamic", use_container_width=True)
     
-    # Download Button
     csv = edited_df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 Download CSV",
