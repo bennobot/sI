@@ -130,7 +130,7 @@ uploaded_file = st.file_uploader("Upload Invoice (PDF)", type="pdf")
 
 if uploaded_file and api_key:
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
     
     # Determine active rules based on selection
     # If user added a new supplier in sidebar, use that, otherwise use selection
