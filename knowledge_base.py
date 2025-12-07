@@ -100,6 +100,11 @@ GLOBAL_RULES_TEXT = f"""
    - Exclude "pump clip", "badge", "foamex" ONLY IF price is 0.00.
    - Exclude line items with 0.00 price unless it is free stock/samples.
 
+5. **HEADER EXTRACTION (CRITICAL)**:
+   - **Payable_To**: The Supplier Name. 
+   - **NEVER** select "Pig's Ears" or "Pig's Ears Beer" as the Payable_To. That is the customer (Bill To). 
+   - You must identify the OTHER company name in the header block.
+
 VALID FORMATS LIST:
 {VALID_FORMATS}
 """
