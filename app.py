@@ -51,23 +51,28 @@ if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
 
-# --- SIDEBAR ---
+# --- SIDEBAR & FORM ---
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input("Google API Key", type="password")
-    st.info("Logic loaded from `knowledge_base.py`")
     
-    st.divider()
-    
-    # --- THE LAB (EDGE CASE FIXER) ---
-    st.subheader("🧪 The Lab (Fix Edge Cases)")
-    st.caption("Use this to test new rules without changing the code. If it works, send the rule to the developer.")
-    
-    custom_rule = st.text_area(
-        "Inject Temporary Rule:", 
-        placeholder="e.g. 'LSS' means Steel Keg\ne.g. Remove 'ABC-' from product name",
-        height=150
-    )
+    # We use a FORM so that Ctrl+Enter in the text area triggers the script
+    with st.form(key='process_form'):
+        api_key = st.text_input("Google API Key", type="password")
+        st.info("Logic loaded from `knowledge_base.py`")
+        st.divider()
+        
+        # --- THE LAB ---
+        st.subheader("🧪 The Lab")
+        st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
+        
+        custom_rule = st.text_area(
+            "Inject Temporary Rule:", 
+            placeholder="e.g. 'LSS' means Steel Keg...",
+            height=150
+        )
+        
+        # This button submits the form
+        submit_button = st.form_submit_button("🚀 Process Invoice", type="primary")
 
 # --- FILE UPLOADER ---
 st.subheader("1. Upload Invoice")
@@ -82,103 +87,110 @@ if uploaded_file:
         st.session_state.last_uploaded_file = uploaded_file.name
 
 # --- MAIN LOGIC ---
-if uploaded_file and api_key:
-    if st.button("🚀 Process Invoice", type="primary"):
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('models/gemini-2.5-flash')
-            
-            with st.spinner("OCR Scanning & Parsing..."):
-                uploaded_file.seek(0)
-                images = convert_from_bytes(uploaded_file.read(), dpi=300)
-                full_text = ""
-                for img in images:
-                    full_text += pytesseract.image_to_string(img) + "\n"
+if uploaded_file and api_key and submit_button:
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
+        
+        with st.spinner("OCR Scanning & Parsing..."):
+            uploaded_file.seek(0)
+            images = convert_from_bytes(uploaded_file.read(), dpi=300)
+            full_text = ""
+            for img in images:
+                full_text += pytesseract.image_to_string(img) + "\n"
 
-                # Inject Custom Rule if present
-                injected_rules = ""
-                if custom_rule:
-                    injected_rules = f"""
-                    ---------------------------------------------------
-                    !!! URGENT USER OVERRIDE - APPLY THIS LOGIC FIRST !!!
-                    {custom_rule}
-                    ---------------------------------------------------
-                    """
-
-                prompt = f"""
-                You are a financial data expert. Extract data to JSON.
-                
-                STRUCTURE:
-                {{
-                    "header": {{
-                        "Payable_To": "Name on Invoice Header",
-                        "Invoice_Number": "...",
-                        "Issue_Date": "...",
-                        "Payment_Terms": "...",
-                        "Due_Date": "...",
-                        "Total_Net": 0.00,
-                        "Total_VAT": 0.00,
-                        "Total_Gross": 0.00,
-                        "Total_Discount_Amount": 0.00,
-                        "Shipping_Charge": 0.00
-                    }},
-                    "line_items": [
-                        {{
-                            "Supplier_Name": "...",
-                            "Collaborator": "...",
-                            "Product_Name": "...",
-                            "ABV": "...",
-                            "Format": "...",
-                            "Pack_Size": "...",
-                            "Volume": "...",
-                            "Quantity": 1,
-                            "Item_Price": 10.00
-                        }}
-                    ]
-                }}
-                
-                SUPPLIER RULEBOOK:
-                {json.dumps(SUPPLIER_RULEBOOK, indent=2)}
-                
-                GLOBAL RULES:
-                {GLOBAL_RULES_TEXT}
-                
-                {injected_rules}
-                
-                Return ONLY valid JSON.
-                
-                INVOICE TEXT:
-                {full_text}
+            # Inject Custom Rule if present
+            injected_rules = ""
+            if custom_rule:
+                injected_rules = f"""
+                ---------------------------------------------------
+                !!! URGENT USER OVERRIDE - APPLY THIS LOGIC FIRST !!!
+                {custom_rule}
+                ---------------------------------------------------
                 """
 
-                response = model.generate_content(prompt)
-                json_text = response.text.strip().replace("```json", "").replace("```", "")
-                data = json.loads(json_text)
-                
-                # Header
-                st.session_state.header_data = pd.DataFrame([data['header']])
-                
-                # Lines
-                df_lines = pd.DataFrame(data['line_items'])
-                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
-                existing_cols = [c for c in cols if c in df_lines.columns]
-                st.session_state.line_items = df_lines[existing_cols]
+            prompt = f"""
+            You are a financial data expert. Extract data to JSON.
+            
+            STRUCTURE:
+            {{
+                "header": {{
+                    "Payable_To": "Name on Invoice Header",
+                    "Invoice_Number": "...",
+                    "Issue_Date": "...",
+                    "Payment_Terms": "...",
+                    "Due_Date": "...",
+                    "Total_Net": 0.00,
+                    "Total_VAT": 0.00,
+                    "Total_Gross": 0.00,
+                    "Total_Discount_Amount": 0.00,
+                    "Shipping_Charge": 0.00
+                }},
+                "line_items": [
+                    {{
+                        "Supplier_Name": "...",
+                        "Collaborator": "...",
+                        "Product_Name": "...",
+                        "ABV": "...",
+                        "Format": "...",
+                        "Pack_Size": "...",
+                        "Volume": "...",
+                        "Quantity": 1,
+                        "Item_Price": 10.00
+                    }}
+                ]
+            }}
+            
+            SUPPLIER RULEBOOK:
+            {json.dumps(SUPPLIER_RULEBOOK, indent=2)}
+            
+            GLOBAL RULES:
+            {GLOBAL_RULES_TEXT}
+            
+            {injected_rules}
+            
+            Return ONLY valid JSON.
+            
+            INVOICE TEXT:
+            {full_text}
+            """
 
-                # Matrix
-                st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
+            response = model.generate_content(prompt)
+            json_text = response.text.strip().replace("```json", "").replace("```", "")
+            data = json.loads(json_text)
+            
+            # Header
+            st.session_state.header_data = pd.DataFrame([data['header']])
+            
+            # Lines
+            df_lines = pd.DataFrame(data['line_items'])
+            cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
+            existing_cols = [c for c in cols if c in df_lines.columns]
+            st.session_state.line_items = df_lines[existing_cols]
 
-        except Exception as e:
-            st.error(f"Error: {e}")
+            # Matrix
+            st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
+
+    except Exception as e:
+        st.error(f"Error: {e}")
 
 # --- DISPLAY RESULTS ---
 if st.session_state.header_data is not None:
     
-    # SUCCESS MESSAGE FOR CUSTOM RULES
+    # SUCCESS MESSAGE FOR CUSTOM RULES (Formatted for knowledge_base.py)
     if custom_rule:
-        st.success("✅ Processed using Custom Rules from The Lab")
-        with st.expander("📩 Copy this logic for the Developer"):
-            st.text("Please add the following rule to knowledge_base.py:")
-            st.code(custom_rule, language="text")
+        st.success("✅ Processed using Custom Rules")
+        
+        # Get Supplier Name from extraction for the key
+        try:
+            detected_supplier = st.session_state.header_data.iloc[0]['Payable_To']
+        except:
+            detected_supplier = "Unknown Supplier"
+            
+        formatted_snippet = f'"{detected_supplier}": """\n{custom_rule}\n""",'
+        
+        with st.expander("📩 Copy this snippet for the Developer"):
+            st.code(formatted_snippet, language="python")
 
     st.divider()
     
