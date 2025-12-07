@@ -91,8 +91,16 @@ GLOBAL_RULES_TEXT = f"""
 
 2. **STRICT FORMAT MAPPING**:
    - Map every item to the "VALID FORMATS LIST" below.
+   
+   **SPECIFIC KEG/CASK RULES:**
    - "Firkin" -> "Cask" / "9 Gallon".
    - "Pin" -> "Cask" / "4.5 Gallon".
+   - **KEGSTAR / eKEG Logic**:
+     - IF description contains "Kegstar" OR "eKeg":
+       - CHECK SIZE: If size is "41L" or "41 Litre" -> Map to Format: "Cask", Volume: "9 Gallon".
+       - ELSE (e.g. 30L, 50L) -> Map to Format: "Steel Keg" (preserve volume).
+
+   **UNIT CONVERSIONS:**
    - Convert ml to cl (e.g. 440ml -> 44cl).
    - Convert L/Ltr -> Litre.
 
@@ -185,7 +193,7 @@ if uploaded_file and api_key:
     try:
         genai.configure(api_key=api_key)
         
-        # UPDATED: Using the specific 2.5 Flash model from your list
+        # Using the specific 2.5 Flash model
         model = genai.GenerativeModel('models/gemini-2.5-flash')
         
         with st.spinner("OCR Scanning..."):
