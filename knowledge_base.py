@@ -86,6 +86,9 @@ GLOBAL_RULES_TEXT = f"""
    - "LSS" -> Steel Keg.
    - "Kegstar" (41L) -> Cask 9 Gallon.
    - "Kegstar" (Other) -> Steel Keg.
+   - "E-Kegr" -> Steel Keg.
+   - "eKeg" -> Steel Keg.
+   - "Keg" -> Steel Keg.
    - "Firkin" -> Cask 9 Gallon.
    - "Pin" -> Cask 4.5 Gallon.
    - "Poly" -> PolyKeg.
