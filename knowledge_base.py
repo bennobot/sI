@@ -149,4 +149,20 @@ SUPPLIER_RULEBOOK = {
     """,
     
     "James Clay and Sons": """
-    - STRATEGY: Split Description into Supplier/Pr
+    - STRATEGY: Split Description into Supplier/Product.
+    - PATTERN: "NxVol" (e.g. 20x50cl) indicates Pack/Volume.
+    """,
+    
+    "Polly's Brew Co.": "PRODUCT NAME: Stop at first hyphen. Watch for 18-packs.",
+    
+    "North Riding Brewery": "DISCOUNT: Handle '(discount)' line item (negative total). Divide by units.",
+    
+    "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions.",
+
+   "German Drinks Company Limited": """
+   - Supplier: Extract from Product Name (e.g. "Rothaus").
+   - Product: The remainder (e.g. "Pils").
+   - Format: Default to "Bottles" unless "Keg" is specified.
+   - Payable To: "German Drinks Company Limited".
+   """
+}
