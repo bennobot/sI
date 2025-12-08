@@ -76,19 +76,20 @@ Cellar Equipment | 250 Pack
 # 2. GLOBAL RULES (Applies to everyone)
 # ==========================================
 GLOBAL_RULES_TEXT = f"""
-1. **PRODUCT NAMES & CLEANING**:
-   - **Remove Prefixes**: Strip codes like "SRM-", "NRB", "30EK", "9G" from the start.
-   - **Remove Sizes**: Remove "12x440ml" or "20L" from the name.
-   - **Collaborator**: Extract partner names (e.g. "STF/Croft" -> Collab: Croft).
-   - **Title Case**: Convert Product Name to Title Case.
+1. **PRODUCT NAMES (STRICT CLEANING)**:
+   - **NO SIZE INFO**: The Product Name field must NOT contain volume or pack info.
+     - BAD: "Pale Ale 20L", "IPA 24x440ml", "Stout | 9G"
+     - GOOD: "Pale Ale", "IPA", "Stout"
+   - **NO DELIMITERS**: Remove characters like "|", "-", ":" from the end of the name.
+   - **Remove Prefixes**: Strip start codes like "SRM-", "NRB", "30EK", "9G".
+   - **Collaborator**: Extract partner names (e.g. "STF/Croft") to the separate Collaborator field.
+   - **Title Case**: Convert to Title Case.
 
 2. **FORMAT MAPPING (The Dictionary)**:
    - "LSS" -> Steel Keg.
    - "Kegstar" (41L) -> Cask 9 Gallon.
    - "Kegstar" (Other) -> Steel Keg.
-   - "E-Kegr" -> Steel Keg.
-   - "eKeg" -> Steel Keg.
-   - "Keg" -> Steel Keg.
+   - "E-Kegr" / "eKeg" / "Keg" -> Steel Keg.
    - "Firkin" -> Cask 9 Gallon.
    - "Pin" -> Cask 4.5 Gallon.
    - "Poly" -> PolyKeg.
@@ -97,7 +98,7 @@ GLOBAL_RULES_TEXT = f"""
 3. **FINANCIALS**: 
    - **Item_Price**: Price per PURCHASE UNIT (Case/Keg). DO NOT divide by pack size.
    - **Landed Cost**: IF delivery charge exists: (Total Delivery Charge / Total Units) + Item Price.
-   - **Discount**: IF line items discount exists: apply to cost price. IF total discount applies, calculate percentage and apply to line items cost price.
+   - **Discount**: Apply line item discounts.
 
 4. **FILTERING**:
    - Exclude "pump clip", "badge", "foamex" ONLY IF price is 0.00.
@@ -105,8 +106,7 @@ GLOBAL_RULES_TEXT = f"""
 
 5. **HEADER EXTRACTION (CRITICAL)**:
    - **Payable_To**: The Supplier Name. 
-   - **NEVER** select "Pig's Ears" or "Pig's Ears Beer" as the Payable_To. That is the customer (Bill To). 
-   - You must identify the OTHER company name in the header block.
+   - **NEVER** select "Pig's Ears" or "Pig's Ears Beer" as the Payable_To.
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
@@ -116,27 +116,25 @@ VALID FORMATS LIST:
 # 3. SUPPLIER SPECIFIC RULEBOOK
 # ==========================================
 SUPPLIER_RULEBOOK = {
-
    "Trenchmore LLP": """
-   - with Tenchmore LLP the Supplier for the products is always Silly Moo Cider
-   - the product name contains the name Silly Moo which needs to be removed
+   - Supplier Name: "Silly Moo Cider".
+   - Product Name: Remove "Silly Moo" from the description.
    """,
    
    "Pilton Cider Ltd": """
-   For Pilton Cider Ltd
-   when the bottle size is 33cl convert the item line to pack size 12 and calculate the item_price and quantity accordingly
-   when the size is 75cl pack size of 1 is correct
+   - BOTTLES: If size is 33cl -> Pack_Size: 12.
+   - BOTTLES: If size is 75cl -> Pack_Size: 1.
    """,
    
     "DEYA Brewing Company": """
-    - FORMAT: "LSS" means "Litre Stainless Steel" -> Map to Steel Keg.
-    - CANS: 500mL cans should be mapped to Volume: 50cl.
+    - FORMAT: "LSS" -> Steel Keg.
+    - CANS: 500mL -> Volume: 50cl.
     """,
 
     "Simple Things Fermentations": """
     - COLLAB: "STF/Croft 3" -> Collaborator is "Croft 3".
-    - PREFIX: Remove "30EK", "9G" from name.
-    - DISCOUNT: Apply 15% discount.
+    - PREFIX: Remove "30EK", "9G".
+    - DISCOUNT: Apply 15%.
     """,
     
     "James Clay and Sons": """
@@ -151,9 +149,9 @@ SUPPLIER_RULEBOOK = {
     "Neon Raptor": "Handle 'Discount' column. Merge multi-line descriptions.",
 
    "German Drinks Company Limited": """
-   For German Drinks Company Limited
-   - The Supplier_Name is part of the Product_Name e.g. Rothaus Pils - Rothaus is the supplier - Pils is the Product_Name
-   - The format will always be bottles, unless it is keg then it is always steel keg
-   - Payable to is German Drinks Company Limited
+   - Supplier Name: Extract from Product Name (e.g. "Rothaus").
+   - Product Name: The remainder (e.g. "Pils").
+   - Format: Default to "Bottles" unless "Keg" is specified.
+   - Payable To: "German Drinks Company Limited".
    """
 }
