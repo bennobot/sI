@@ -108,7 +108,7 @@ def create_product_checker(df):
     
     checker_rows = []
     for _, row in df.iterrows():
-        abv = str(row['ABV']).replace('%', '') if row['ABV'] else ""
+        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
         parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
         col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
         
@@ -141,8 +141,7 @@ with st.sidebar:
     with st.form(key='process_form'):
         if not api_key:
             api_key = st.text_input("Google API Key", type="password")
-        
-        st.info("Logic loaded from `knowledge_base.py`")
+    
         st.divider()
         
         st.subheader("🧪 The Lab")
