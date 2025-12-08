@@ -75,10 +75,16 @@ Cellar Equipment | 250 Pack
 # ==========================================
 # 2. GLOBAL RULES (Applies to everyone)
 # ==========================================
+# ==========================================
+# 2. GLOBAL RULES (Applies to everyone)
+# ==========================================
 GLOBAL_RULES_TEXT = f"""
-1. **PRODUCT NAMES (STRICT CLEANING)**:
-   - **NO SIZE/FORMAT**: The Product Name must NOT contain info like "20L", "Keg", "Cans", "24x33cl".
-   - **NO DELIMITERS**: Remove characters like "|", "-", ":" from the name.
+1. **PRODUCT NAMES (SMART CLEANING)**:
+   - **Hyphen Handling**: 
+     - **DO NOT** blindly split at every hyphen (-).
+     - **CHECK**: Does the text AFTER the hyphen describe the Beer (e.g. "Nelson Sauvin", "Restoration Series")? -> **KEEP IT**.
+     - **CHECK**: Does the text AFTER the hyphen describe Format/Size (e.g. "Firkin", "9G", "Keg")? -> **REMOVE IT**.
+     - Example: "Ruby Mild - Restoration Series - Firkin" -> Product Name: "Ruby Mild - Restoration Series".
    - **Remove Prefixes**: Strip codes like "SRM-", "NRB", "30EK", "9G".
    - **Collaborator**: Extract partner names (e.g. "STF/Croft" -> Collab: Croft).
    - **Title Case**: Convert Product Name to Title Case.
@@ -87,37 +93,29 @@ GLOBAL_RULES_TEXT = f"""
    - "LSS" -> Steel Keg.
    - "Kegstar" (41L) -> Cask 9 Gallon.
    - "Kegstar" (Other) -> Steel Keg.
-   - "E-Kegr" / "eKeg" / "Keg" -> Steel Keg.
+   - "E-Keg" / "eKeg" / "Keg" -> Steel Keg.
    - "Firkin" -> Cask 9 Gallon.
    - "Pin" -> Cask 4.5 Gallon.
    - "Poly" -> PolyKeg.
    - **Conversions**: ml->cl, L->Litre.
 
-3. **VALID LIST HANDLING (IMPORTANT)**:
-   - The "VALID FORMATS LIST" below uses the syntax: `Format | Volume`.
-   - **YOU MUST SPLIT THIS**. 
-     - **Format Column**: Use the text *before* the pipe (e.g. "Steel Keg").
-     - **Volume Column**: Use the text *after* the pipe (e.g. "20 Litre").
-   - **DO NOT** put the pipe (`|`) or the volume into the Format column.
+3. **VALID LIST HANDLING**:
+   - The "VALID FORMATS LIST" uses `Format | Volume`. SPLIT this into two columns.
 
 4. **PACK SIZE vs QUANTITY**:
-   - **Pack_Size**: 
-     - For **Bottles/Cans**: The count inside the case (e.g. 12, 24).
-     - For **Kegs/Casks**: Must be **NULL** (Empty). Do not put '1'.
-   - **Quantity**: The number of units ordered.
+   - **Pack_Size**: Bottles/Cans = count. Kegs = NULL.
+   - **Quantity**: Units ordered.
 
 5. **FINANCIALS**: 
-   - **Item_Price**: Price per PURCHASE UNIT (Case/Keg). DO NOT divide by pack size.
-   - **Landed Cost**: IF delivery charge exists: (Total Delivery Charge / Total Units) + Item Price.
+   - **Item_Price**: Price per PURCHASE UNIT.
+   - **Landed Cost**: (Total Delivery / Total Units) + Item Price.
    - **Discount**: Apply line item discounts.
 
 6. **FILTERING**:
-   - Exclude "pump clip", "badge", "foamex" ONLY IF price is 0.00.
-   - Exclude line items with 0.00 price unless it is free stock/samples.
+   - Exclude "pump clip", "badge" ONLY IF price is 0.00.
 
 7. **HEADER EXTRACTION**:
-   - **Payable_To**: The Supplier Name. 
-   - **NEVER** select "Pig's Ears" or "Pig's Ears Beer" as the Payable_To.
+   - **Payable_To**: The Supplier Name (Not Pig's Ears).
 
 VALID FORMATS LIST:
 {VALID_FORMATS}
