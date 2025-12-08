@@ -43,11 +43,14 @@ st.title("Brewery Invoice Parser ⚡")
 # ==========================================
 
 def get_master_supplier_list():
+    """Fetch the clean list of suppliers from Google Sheets"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="MasterData", ttl=600)
+        df = conn.read(worksheet="MasterData", ttl=0) # ttl=0 forces fresh read
         return df['Supplier_Master'].dropna().astype(str).tolist()
-    except Exception:
+    except Exception as e:
+        # Print the specific error to the sidebar so we can see it
+        st.sidebar.error(f"Sheets Error: {str(e)}")
         return []
 
 def normalize_supplier_names(df, master_list):
