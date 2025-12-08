@@ -108,7 +108,7 @@ def create_product_checker(df):
     
     checker_rows = []
     for _, row in df.iterrows():
-        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
+        abv = str(row['ABV']).replace('%', '') if row['ABV'] else ""
         parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
         col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
         
