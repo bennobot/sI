@@ -46,20 +46,23 @@ def get_master_supplier_list():
     """Fetch the clean list of suppliers from Google Sheets"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="MasterData", ttl=0) # ttl=0 forces fresh read
+        df = conn.read(worksheet="MasterData", ttl=600)
         return df['Supplier_Master'].dropna().astype(str).tolist()
     except Exception as e:
-        # Print the specific error to the sidebar so we can see it
-        st.sidebar.error(f"Sheets Error: {str(e)}")
+        # Show error in sidebar if connection fails, but don't crash app
+        st.sidebar.warning(f"Sheets Warning: {str(e)}")
         return []
 
 def normalize_supplier_names(df, master_list):
+    """Fuzzy match Supplier_Name in line items against Master List"""
     if df is None or df.empty or not master_list:
         return df
     
     def match_name(name):
         if not isinstance(name, str): return name
+        # Find best match
         match, score = process.extractOne(name, master_list)
+        # Threshold: 88% similarity required to overwrite
         return match if score >= 88 else name
 
     if 'Supplier_Name' in df.columns:
@@ -136,7 +139,7 @@ with st.sidebar:
     with st.form("process"):
         st.info("Logic loaded from `knowledge_base.py`")
         if st.session_state.master_suppliers:
-            st.success(f"Loaded {len(st.session_state.master_suppliers)} Master Suppliers from Sheets")
+            st.success(f"Loaded {len(st.session_state.master_suppliers)} Master Suppliers")
         else:
             st.warning("Master Supplier List not found (Check Sheets connection)")
             
@@ -212,14 +215,10 @@ if uploaded_file and api_key and submit_button:
             # 1. Clean Names
             df_lines = clean_product_names(df_lines)
             
-            # 2. Normalize Suppliers (Fuzzy Match)
+            # 2. Normalize Suppliers (Fuzzy Match) - ONLY FOR LINE ITEMS
             if st.session_state.master_suppliers:
                 df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
-                if not st.session_state.header_data.empty:
-                    orig = st.session_state.header_data.iloc[0]['Payable_To']
-                    match, score = process.extractOne(orig, st.session_state.master_suppliers)
-                    if score >= 88:
-                        st.session_state.header_data['Payable_To'] = match
+                # NOTE: We intentionally DO NOT update the Header 'Payable_To' anymore.
 
             cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
             existing = [c for c in cols if c in df_lines.columns]
