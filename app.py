@@ -4,6 +4,7 @@ from pdf2image import convert_from_bytes
 import pytesseract
 import google.generativeai as genai
 import json
+import re
 
 # Import the Brain
 from knowledge_base import GLOBAL_RULES_TEXT, SUPPLIER_RULEBOOK
@@ -12,6 +13,27 @@ st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
 st.title("Brewery Invoice Parser ⚡")
 
 # --- DATA PROCESSING FUNCTIONS ---
+
+def clean_product_names(df):
+    """
+    Post-processing to remove artifacts like pipes (|), sizes, and excess whitespace 
+    that the AI might leave behind in the Product Name column.
+    """
+    if df is None or df.empty: return df
+    
+    def cleaner(name):
+        if not isinstance(name, str): return name
+        # Remove pipe characters
+        name = name.replace('|', '')
+        # Remove common size patterns (e.g. 24x33cl, 9g, 30L) if they leaked in
+        name = re.sub(r'\b\d+x\d+cl\b', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\b\d+g\b', '', name, flags=re.IGNORECASE)
+        # Clean whitespace
+        return ' '.join(name.split())
+
+    if 'Product_Name' in df.columns:
+        df['Product_Name'] = df['Product_Name'].apply(cleaner)
+    return df
 
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
@@ -49,42 +71,42 @@ def create_product_matrix(df):
 
 def create_product_checker(df):
     """
-    Creates a simplified view for validation.
-    Col 1: Supplier / Product / ABV / Format
-    Col 2: Size (formatted as '24x33cl' or just '30L')
+    Creates a specific formatted table for checking ERP codes.
+    Format: "Supplier / Product / ABV / Format"
+    Size: "PackSize x Volume" (or just Volume if PackSize is empty)
     """
     if df is None or df.empty: return pd.DataFrame()
     
     checker_rows = []
-    
     for _, row in df.iterrows():
-        # Construct Column 1
-        # Handle cases where Collaborator is empty
-        collab_str = f" / {row['Collaborator']}" if row.get('Collaborator') else ""
-        col_1 = f"{row['Supplier_Name']}{collab_str} / {row['Product_Name']} / {row['ABV']} / {row['Format']}"
+        # Build Col 1: Composite String
+        # Handle ABV formatting
+        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
         
-        # Construct Column 2 (Size Logic)
-        pack = row.get('Pack_Size')
-        vol = row.get('Volume')
+        # Build parts list, filtering out empty values
+        parts = [
+            str(row['Supplier_Name']),
+            str(row['Product_Name']),
+            abv,
+            str(row['Format'])
+        ]
+        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
         
-        # Check if pack is a valid number (not empty, not 0, not 1)
-        try:
-            pack_val = float(pack) if pack else 0
-            is_multipack = pack_val > 1
-        except:
-            is_multipack = False
-
-        if is_multipack:
-            col_2 = f"{int(pack_val)}x{vol}"
+        # Build Col 2: Size String
+        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
+        vol = str(row['Volume'])
+        
+        if pack and pack != '0' and pack != '1':
+            col2 = f"{pack}x{vol}"
         else:
-            col_2 = str(vol)
+            col2 = vol
             
         checker_rows.append({
-            "Product String": col_1,
-            "Size": col_2
+            "ERP_String": col1,
+            "Size_String": col2
         })
         
-    return pd.DataFrame(checker_rows)
+    return pd.DataFrame(checker_rows).drop_duplicates()
 
 # --- SESSION STATE ---
 if 'header_data' not in st.session_state: st.session_state.header_data = None
@@ -92,7 +114,7 @@ if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
 if 'checker_data' not in st.session_state: st.session_state.checker_data = None
 
-# --- SIDEBAR & FORM ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
     
@@ -104,6 +126,7 @@ with st.sidebar:
         st.subheader("🧪 The Lab")
         st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
         custom_rule = st.text_area("Inject Temporary Rule:", height=150)
+        
         submit_button = st.form_submit_button("🚀 Process Invoice", type="primary")
 
 # --- FILE UPLOADER ---
@@ -133,7 +156,7 @@ if uploaded_file and api_key and submit_button:
 
             injected_rules = ""
             if custom_rule:
-                injected_rules = f"\n!!! USER OVERRIDE !!!\n{custom_rule}\n"
+                injected_rules = f"\n!!! URGENT USER OVERRIDE !!!\n{custom_rule}\n"
 
             prompt = f"""
             You are a financial data expert. Extract data to JSON.
@@ -188,6 +211,10 @@ if uploaded_file and api_key and submit_button:
             st.session_state.header_data = pd.DataFrame([data['header']])
             
             df_lines = pd.DataFrame(data['line_items'])
+            
+            # --- CLEANING STEP ---
+            df_lines = clean_product_names(df_lines)
+            
             cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
             existing_cols = [c for c in cols if c in df_lines.columns]
             st.session_state.line_items = df_lines[existing_cols]
@@ -206,37 +233,35 @@ if st.session_state.header_data is not None:
         try:
             detected_supplier = st.session_state.header_data.iloc[0]['Payable_To']
         except:
-            detected_supplier = "Unknown"
-        snippet = f'"{detected_supplier}": """\n{custom_rule}\n""",'
+            detected_supplier = "Unknown Supplier"
+        formatted_snippet = f'"{detected_supplier}": """\n{custom_rule}\n""",'
         with st.expander("📩 Developer Snippet"):
-            st.code(snippet, language="python")
+            st.code(formatted_snippet, language="python")
 
     st.divider()
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📄 Header", "📝 Lines", "📊 Matrix", "✅ Checker"])
+    # Updated Tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📄 Header", "📝 Line Items", "📊 Matrix", "🔍 Product Checker"])
     
     with tab1:
-        st.subheader("Header Details")
         st.dataframe(st.session_state.header_data, use_container_width=True)
-        csv = st.session_state.header_data.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download CSV", csv, "header.csv", "text/csv")
+        csv_head = st.session_state.header_data.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Header CSV", csv_head, "header.csv", "text/csv")
         
     with tab2:
-        st.subheader("Line Items")
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", use_container_width=True)
-        csv = edited_lines.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download CSV", csv, "lines.csv", "text/csv")
+        csv_lines = edited_lines.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Lines CSV", csv_lines, "lines.csv", "text/csv")
         
     with tab3:
-        st.subheader("Product Matrix")
         if st.session_state.matrix_data is not None:
             st.dataframe(st.session_state.matrix_data, use_container_width=True)
-            csv = st.session_state.matrix_data.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download CSV", csv, "matrix.csv", "text/csv")
-
+            csv_matrix = st.session_state.matrix_data.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Matrix CSV", csv_matrix, "matrix.csv", "text/csv")
+            
     with tab4:
-        st.subheader("Product Checker")
+        st.subheader("ERP Product Checker")
         if st.session_state.checker_data is not None:
             st.dataframe(st.session_state.checker_data, use_container_width=True)
-            csv = st.session_state.checker_data.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download CSV", csv, "checker.csv", "text/csv")
+            csv_check = st.session_state.checker_data.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Checker CSV", csv_check, "product_checker.csv", "text/csv")
