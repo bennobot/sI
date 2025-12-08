@@ -141,8 +141,6 @@ with st.sidebar:
     with st.form(key='process_form'):
         if not api_key:
             api_key = st.text_input("Google API Key", type="password")
-    
-        st.divider()
         
         st.subheader("🧪 The Lab")
         st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
