@@ -120,15 +120,44 @@ def reconstruct_lines_from_matrix(matrix_df):
 
 def create_product_checker(df):
     if df is None or df.empty: return pd.DataFrame()
+    
     checker_rows = []
     for _, row in df.iterrows():
+        # 1. Build ERP String (Col 1)
         abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
-        parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
-        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
-        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
-        vol = str(row['Volume'])
-        col2 = f"{pack}x{vol}" if (pack and pack != '0' and pack != '1') else vol
+        parts = [
+            str(row['Supplier_Name']), 
+            str(row['Product_Name']), 
+            abv, 
+            str(row['Format'])
+        ]
+        # Filter out 'None', 'nan', or empty strings
+        col1 = " / ".join([p for p in parts if p and p.lower() not in ['none', 'nan', '']])
+        
+        # 2. Build Size String (Col 2)
+        # Handle Pack Size (Convert float to int string, handle NaN)
+        raw_pack = row['Pack_Size']
+        pack = ""
+        
+        if pd.notna(raw_pack) and raw_pack != "":
+            try:
+                # Convert "24.0" to "24"
+                val = float(raw_pack)
+                if val > 1: # We only show pack size if it's a multipack (greater than 1)
+                    pack = str(int(val))
+            except:
+                pack = str(raw_pack) # Keep as string if it's weird text
+
+        vol = str(row['Volume']) if pd.notna(row['Volume']) else ""
+        
+        # Logic: If pack exists -> "24x440ml". If not -> "30 Litre"
+        if pack:
+            col2 = f"{pack}x{vol}"
+        else:
+            col2 = vol
+            
         checker_rows.append({"ERP_String": col1, "Size_String": col2})
+        
     return pd.DataFrame(checker_rows).drop_duplicates()
 
 # --- GOOGLE DRIVE HELPERS ---
