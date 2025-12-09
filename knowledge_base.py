@@ -125,6 +125,11 @@ VALID FORMATS LIST:
 # 3. SUPPLIER SPECIFIC RULEBOOK
 # ==========================================
 SUPPLIER_RULEBOOK = {
+
+   "Little Mercies Limited": """
+   For Little Mercies all bottles apart from Gift Boxes need to be adjusted to be pack size 1. The cost price needs to be recalculated to account for this 
+   """,
+   
    "Trenchmore LLP": """
    - Supplier Name: "Silly Moo Cider".
    - Product Name: Remove "Silly Moo" from description.
