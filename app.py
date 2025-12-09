@@ -66,14 +66,15 @@ def clean_product_names(df):
         df['Product_Name'] = df['Product_Name'].apply(cleaner)
     return df
 
-# --- MATRIX LOGIC (UPDATED TO INCLUDE QUANTITY) ---
+# --- MATRIX LOGIC (FIXED SORTING) ---
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
     
-    # Identify Product Groups
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
-    grouped = df.groupby(group_cols)
+    
+    # CRITICAL CHANGE: sort=False keeps the order from the original invoice
+    grouped = df.groupby(group_cols, sort=False)
     
     matrix_rows = []
     for name, group in grouped:
@@ -83,56 +84,46 @@ def create_product_matrix(df):
             'Product_Name': name[2],
             'ABV': name[3]
         }
-        # Flatten formats into columns
         for i, (_, item) in enumerate(group.iterrows()):
-            if i >= 3: break # Max 3 formats per product
+            if i >= 3: break
             suffix = str(i + 1)
             row[f'Format{suffix}'] = item['Format']
             row[f'Pack_Size{suffix}'] = item['Pack_Size']
             row[f'Volume{suffix}'] = item['Volume']
             row[f'Item_Price{suffix}'] = item['Item_Price']
-            row[f'Quantity{suffix}'] = item['Quantity'] # ADDED QUANTITY
+            row[f'Quantity{suffix}'] = item['Quantity']
         matrix_rows.append(row)
         
     matrix_df = pd.DataFrame(matrix_rows)
     
-    # Reorder columns logically
     base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     format_cols = []
     for i in range(1, 4):
         format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Quantity{i}'])
     
-    # Ensure columns exist before selecting
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
 
-# --- REVERSE LOGIC: MATRIX -> LINE ITEMS ---
 def reconstruct_lines_from_matrix(matrix_df):
     if matrix_df is None or matrix_df.empty: return pd.DataFrame()
-    
     new_lines = []
-    
     for _, row in matrix_df.iterrows():
-        # Base info
-        base_info = {
+        base = {
             'Supplier_Name': row.get('Supplier_Name', ''),
             'Collaborator': row.get('Collaborator', ''),
             'Product_Name': row.get('Product_Name', ''),
             'ABV': row.get('ABV', '')
         }
-        
-        # Check for up to 3 formats
         for i in range(1, 4):
-            fmt_key = f'Format{i}'
-            if fmt_key in row and pd.notna(row[fmt_key]) and str(row[fmt_key]).strip() != "":
-                line_item = base_info.copy()
-                line_item['Format'] = row.get(f'Format{i}', '')
-                line_item['Pack_Size'] = row.get(f'Pack_Size{i}', '')
-                line_item['Volume'] = row.get(f'Volume{i}', '')
-                line_item['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
-                line_item['Quantity'] = row.get(f'Quantity{i}', 0)
-                new_lines.append(line_item)
-                
+            fmt = row.get(f'Format{i}')
+            if pd.notna(fmt) and str(fmt).strip():
+                line = base.copy()
+                line['Format'] = fmt
+                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
+                line['Volume'] = row.get(f'Volume{i}', '')
+                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
+                line['Quantity'] = row.get(f'Quantity{i}', 0)
+                new_lines.append(line)
     return pd.DataFrame(new_lines)
 
 def create_product_checker(df):
@@ -192,6 +183,8 @@ if uploaded_file:
     if 'last_uploaded_file' not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
         st.session_state.header_data = None
         st.session_state.line_items = None
+        st.session_state.matrix_data = None
+        st.session_state.checker_data = None
         st.session_state.last_uploaded_file = uploaded_file.name
 
 if uploaded_file and api_key and submit_button:
@@ -238,14 +231,11 @@ if uploaded_file and api_key and submit_button:
             json_text = response.text.strip().replace("```json", "").replace("```", "")
             data = json.loads(json_text)
             
-            # --- POST PROCESSING ---
             st.session_state.header_data = pd.DataFrame([data['header']])
             df_lines = pd.DataFrame(data['line_items'])
             
-            # 1. Clean Names
             df_lines = clean_product_names(df_lines)
             
-            # 2. Normalize Suppliers
             if st.session_state.master_suppliers:
                 df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
@@ -253,7 +243,7 @@ if uploaded_file and api_key and submit_button:
             existing = [c for c in cols if c in df_lines.columns]
             st.session_state.line_items = df_lines[existing]
             
-            # 3. Generate Matrix First
+            # 3. Generate Derived Tables (Sort=False applied inside function)
             st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
             st.session_state.checker_data = create_product_checker(st.session_state.line_items)
 
@@ -261,7 +251,7 @@ if uploaded_file and api_key and submit_button:
         st.error(f"Error: {e}")
 
 # ==========================================
-# 4. DISPLAY & EDITING
+# 4. DISPLAY
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -273,46 +263,29 @@ if st.session_state.header_data is not None:
             st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
-    # CHANGED: Matrix is now the first tab
-    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📄 Header", "📝 Line Items (Read Only)", "🔍 Checker"])
+    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📄 Header", "📝 Line Items", "🔍 Checker"])
     
-    # --- TAB 1: MATRIX (MAIN EDITING AREA) ---
     with t1:
         st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
-        
-        # Editable Matrix
         edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", use_container_width=True)
-        
         colA, colB = st.columns([1, 4])
         with colA:
             if st.button("🔄 Sync & Regenerate"):
-                # 1. Save Matrix State
                 st.session_state.matrix_data = edited_matrix
-                
-                # 2. Reconstruct Line Items from Matrix
                 st.session_state.line_items = reconstruct_lines_from_matrix(edited_matrix)
-                
-                # 3. Reconstruct Checker from new Lines
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
-                
-                st.success("All files synced with Matrix edits!")
+                st.success("Synced!")
                 st.rerun()
-        
         with colB:
-            st.download_button("📥 Download Matrix CSV", edited_matrix.to_csv(index=False), "matrix.csv")
+            st.download_button("📥 Download CSV", edited_matrix.to_csv(index=False), "matrix.csv")
 
-    # --- TAB 2: HEADER ---
     with t2:
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", use_container_width=True)
         st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
-        
-    # --- TAB 3: LINE ITEMS (Generated from Matrix) ---
     with t3:
-        st.caption("This data is generated automatically from your Matrix edits.")
+        st.caption("Generated from Matrix.")
         st.dataframe(st.session_state.line_items, use_container_width=True)
         st.download_button("📥 Download CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
-            
-    # --- TAB 4: CHECKER ---
     with t4:
         if st.session_state.checker_data is not None:
             st.dataframe(st.session_state.checker_data, use_container_width=True)
