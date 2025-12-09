@@ -132,7 +132,6 @@ def create_product_checker(df):
 
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
-    """Authenticate with Google Drive using existing Sheets Secrets"""
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         creds_dict = st.secrets["connections"]["gsheets"]
         creds = service_account.Credentials.from_service_account_info(
@@ -140,15 +139,15 @@ def get_drive_service():
         )
         return build('drive', 'v3', credentials=creds)
     else:
-        st.error("Google Cloud Credentials missing in secrets.toml")
         return None
 
 def list_files_in_folder(folder_id):
     service = get_drive_service()
     if not service: return []
-    # Query for PDF files in the specific folder, ignoring trash
+    # Query: In folder, is PDF, not trashed
     query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
+    # Pagination might be needed for >100 files, but this covers basic scanning
+    results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
     return results.get('files', [])
 
 def download_file_from_drive(file_id):
@@ -167,12 +166,15 @@ def download_file_from_drive(file_id):
 # 2. SESSION & SIDEBAR
 # ==========================================
 
+# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
 if 'checker_data' not in st.session_state: st.session_state.checker_data = None
 if 'master_suppliers' not in st.session_state: st.session_state.master_suppliers = get_master_supplier_list()
 if 'drive_files' not in st.session_state: st.session_state.drive_files = []
+if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
+if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
 
 with st.sidebar:
     st.header("Settings")
@@ -182,22 +184,35 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter API Key", type="password")
 
-    with st.form("process"):
-        st.info("Logic loaded from `knowledge_base.py`")
-        custom_rule = st.text_area("Inject Temporary Rule (The Lab):", height=100)
-        
-        st.divider()
-        st.subheader("📂 Google Drive")
-        folder_id = st.text_input("Drive Folder ID", help="The ID from the URL")
-        scan_btn = st.form_submit_button("🔍 Scan Folder")
-        
-        if scan_btn and folder_id:
+    st.info("Logic loaded from `knowledge_base.py`")
+    
+    # --- DRIVE SCANNER (SEPARATE FROM FORM) ---
+    st.divider()
+    st.subheader("📂 Google Drive")
+    folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
+    
+    if st.button("🔍 Scan Folder"):
+        if folder_id:
             try:
-                files = list_files_in_folder(folder_id)
-                st.session_state.drive_files = files
-                st.success(f"Found {len(files)} PDFs")
+                with st.spinner("Scanning..."):
+                    files = list_files_in_folder(folder_id)
+                    st.session_state.drive_files = files
+                if files:
+                    st.success(f"Found {len(files)} PDFs!")
+                else:
+                    st.warning("No PDFs found or Access Denied.")
             except Exception as e:
-                st.error(f"Drive Error: {e}")
+                st.error(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- THE LAB (TEACHING FORM) ---
+    st.subheader("🧪 The Lab")
+    with st.form("teaching_form"):
+        st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
+        custom_rule = st.text_area("Inject Temporary Rule:", height=100)
+        # Note: We don't use the submit button for processing anymore, just for rule injection context
+        st.form_submit_button("Set Rule")
 
     st.divider()
     if st.button("Log Out"):
@@ -208,54 +223,66 @@ with st.sidebar:
 # 3. MAIN LOGIC (SOURCE SELECTION)
 # ==========================================
 
-st.subheader("1. Select Source")
+st.subheader("1. Select Invoice Source")
 tab_upload, tab_drive = st.tabs(["⬆️ Manual Upload", "☁️ Google Drive"])
 
-selected_file_stream = None
-selected_filename = "unknown.pdf"
+final_stream = None
+source_name = "Unknown"
 
-# Manual Tab
+# --- TAB 1: MANUAL ---
 with tab_upload:
     uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
     if uploaded_file:
-        selected_file_stream = uploaded_file
-        selected_filename = uploaded_file.name
+        final_stream = uploaded_file
+        source_name = uploaded_file.name
 
-# Drive Tab
+# --- TAB 2: DRIVE ---
 with tab_drive:
     if st.session_state.drive_files:
-        file_map = {f['name']: f['id'] for f in st.session_state.drive_files}
-        drive_choice = st.selectbox("Select Invoice from Drive", options=list(file_map.keys()))
-        if drive_choice:
-            st.session_state.selected_drive_id = file_map[drive_choice]
-            st.session_state.selected_drive_name = drive_choice
-            st.info(f"Ready to process: {drive_choice}")
+        # Create a clean list of names
+        file_names = [f['name'] for f in st.session_state.drive_files]
+        
+        selected_name = st.selectbox(
+            "Select Invoice from Drive List:", 
+            options=file_names,
+            index=None,
+            placeholder="Choose a file..."
+        )
+        
+        if selected_name:
+            # Find the ID for the name
+            file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
+            st.session_state.selected_drive_id = file_data['id']
+            st.session_state.selected_drive_name = file_data['name']
+            st.info(f"Selected: **{selected_name}**")
     else:
-        st.info("Enter Folder ID in sidebar and click Scan.")
+        st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
 
-# --- PROCESSING BUTTON ---
-if st.button("🚀 Process Invoice", type="primary"):
+# --- PROCESS BUTTON (GLOBAL) ---
+if st.button("🚀 Process Selected Invoice", type="primary"):
     
-    # 1. Resolve File Source
-    final_stream = None
+    # Determine which file to process (Manual takes precedence if both exist)
+    target_stream = None
     
     if uploaded_file:
-        final_stream = uploaded_file
-    elif 'selected_drive_id' in st.session_state:
+        target_stream = uploaded_file
+    elif st.session_state.selected_drive_id:
         try:
             with st.spinner(f"Downloading {st.session_state.selected_drive_name}..."):
-                final_stream = download_file_from_drive(st.session_state.selected_drive_id)
+                target_stream = download_file_from_drive(st.session_state.selected_drive_id)
         except Exception as e:
             st.error(f"Download Failed: {e}")
+    else:
+        st.warning("⚠️ Please upload a file or select one from Google Drive first.")
 
-    # 2. Run Processing if we have a file
-    if final_stream and api_key:
+    # Execute Processing
+    if target_stream and api_key:
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('models/gemini-2.5-flash')
             
             with st.spinner("AI Processing..."):
-                images = convert_from_bytes(final_stream.read(), dpi=300)
+                images = convert_from_bytes(target_stream.read(), dpi=300)
                 full_text = ""
                 for img in images:
                     full_text += pytesseract.image_to_string(img) + "\n"
@@ -296,8 +323,10 @@ if st.button("🚀 Process Invoice", type="primary"):
                 st.session_state.header_data = pd.DataFrame([data['header']])
                 df_lines = pd.DataFrame(data['line_items'])
                 
-                # Clean & Normalize
+                # 1. Clean Names
                 df_lines = clean_product_names(df_lines)
+                
+                # 2. Normalize Suppliers
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
@@ -305,14 +334,12 @@ if st.button("🚀 Process Invoice", type="primary"):
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
-                # Derived Tables
+                # 3. Derived Tables
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
 
         except Exception as e:
-            st.error(f"Processing Error: {e}")
-    else:
-        st.warning("Please upload a file or select one from Drive.")
+            st.error(f"Error: {e}")
 
 # ==========================================
 # 4. DISPLAY
