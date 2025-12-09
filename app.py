@@ -146,9 +146,11 @@ def list_files_in_folder(folder_id):
     if not service: return []
     # Query: In folder, is PDF, not trashed
     query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-    # Pagination might be needed for >100 files, but this covers basic scanning
     results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
-    return results.get('files', [])
+    files = results.get('files', [])
+    # SORT ALPHABETICALLY BY NAME
+    files.sort(key=lambda x: x['name'].lower())
+    return files
 
 def download_file_from_drive(file_id):
     service = get_drive_service()
@@ -186,7 +188,7 @@ with st.sidebar:
 
     st.info("Logic loaded from `knowledge_base.py`")
     
-    # --- DRIVE SCANNER (SEPARATE FROM FORM) ---
+    # --- DRIVE SCANNER ---
     st.divider()
     st.subheader("📂 Google Drive")
     folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
@@ -206,12 +208,11 @@ with st.sidebar:
     
     st.divider()
     
-    # --- THE LAB (TEACHING FORM) ---
+    # --- THE LAB ---
     st.subheader("🧪 The Lab")
     with st.form("teaching_form"):
         st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
         custom_rule = st.text_area("Inject Temporary Rule:", height=100)
-        # Note: We don't use the submit button for processing anymore, just for rule injection context
         st.form_submit_button("Set Rule")
 
     st.divider()
@@ -239,7 +240,7 @@ with tab_upload:
 # --- TAB 2: DRIVE ---
 with tab_drive:
     if st.session_state.drive_files:
-        # Create a clean list of names
+        # Create a clean list of names (SORTED)
         file_names = [f['name'] for f in st.session_state.drive_files]
         
         selected_name = st.selectbox(
@@ -250,7 +251,6 @@ with tab_drive:
         )
         
         if selected_name:
-            # Find the ID for the name
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
@@ -259,9 +259,8 @@ with tab_drive:
         st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
 
 # --- PROCESS BUTTON (GLOBAL) ---
-if st.button("🚀 Process Selected Invoice", type="primary"):
+if st.button("🚀 Process Invoice", type="primary"):
     
-    # Determine which file to process (Manual takes precedence if both exist)
     target_stream = None
     
     if uploaded_file:
@@ -275,7 +274,6 @@ if st.button("🚀 Process Selected Invoice", type="primary"):
     else:
         st.warning("⚠️ Please upload a file or select one from Google Drive first.")
 
-    # Execute Processing
     if target_stream and api_key:
         try:
             genai.configure(api_key=api_key)
@@ -323,10 +321,7 @@ if st.button("🚀 Process Selected Invoice", type="primary"):
                 st.session_state.header_data = pd.DataFrame([data['header']])
                 df_lines = pd.DataFrame(data['line_items'])
                 
-                # 1. Clean Names
                 df_lines = clean_product_names(df_lines)
-                
-                # 2. Normalize Suppliers
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
@@ -334,7 +329,6 @@ if st.button("🚀 Process Selected Invoice", type="primary"):
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
-                # 3. Derived Tables
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
 
