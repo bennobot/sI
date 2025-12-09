@@ -17,24 +17,19 @@ st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
 # 0. AUTHENTICATION
 # ==========================================
 def check_password():
-    if "APP_PASSWORD" not in st.secrets:
-        return True
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-    if st.session_state.password_correct:
-        return True
+    if "APP_PASSWORD" not in st.secrets: return True
+    if "password_correct" not in st.session_state: st.session_state.password_correct = False
+    if st.session_state.password_correct: return True
     st.title("🔒 Login Required")
     pwd_input = st.text_input("Enter Password", type="password")
     if st.button("Log In"):
         if pwd_input == st.secrets["APP_PASSWORD"]:
             st.session_state.password_correct = True
             st.rerun()
-        else:
-            st.error("Incorrect Password")
+        else: st.error("Incorrect Password")
     return False
 
-if not check_password():
-    st.stop()
+if not check_password(): st.stop()
 
 st.title("Brewery Invoice Parser ⚡")
 
@@ -43,28 +38,18 @@ st.title("Brewery Invoice Parser ⚡")
 # ==========================================
 
 def get_master_supplier_list():
-    """Fetch the clean list of suppliers from Google Sheets"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(worksheet="MasterData", ttl=600)
         return df['Supplier_Master'].dropna().astype(str).tolist()
-    except Exception as e:
-        # Show error in sidebar if connection fails, but don't crash app
-        st.sidebar.warning(f"Sheets Warning: {str(e)}")
-        return []
+    except: return []
 
 def normalize_supplier_names(df, master_list):
-    """Fuzzy match Supplier_Name in line items against Master List"""
-    if df is None or df.empty or not master_list:
-        return df
-    
+    if df is None or df.empty or not master_list: return df
     def match_name(name):
         if not isinstance(name, str): return name
-        # Find best match
         match, score = process.extractOne(name, master_list)
-        # Threshold: 88% similarity required to overwrite
         return match if score >= 88 else name
-
     if 'Supplier_Name' in df.columns:
         df['Supplier_Name'] = df['Supplier_Name'].apply(match_name)
     return df
@@ -81,29 +66,74 @@ def clean_product_names(df):
         df['Product_Name'] = df['Product_Name'].apply(cleaner)
     return df
 
+# --- MATRIX LOGIC (UPDATED TO INCLUDE QUANTITY) ---
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
+    
+    # Identify Product Groups
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     grouped = df.groupby(group_cols)
+    
     matrix_rows = []
     for name, group in grouped:
-        row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
+        row = {
+            'Supplier_Name': name[0],
+            'Collaborator': name[1],
+            'Product_Name': name[2],
+            'ABV': name[3]
+        }
+        # Flatten formats into columns
         for i, (_, item) in enumerate(group.iterrows()):
-            if i >= 3: break
+            if i >= 3: break # Max 3 formats per product
             suffix = str(i + 1)
             row[f'Format{suffix}'] = item['Format']
             row[f'Pack_Size{suffix}'] = item['Pack_Size']
             row[f'Volume{suffix}'] = item['Volume']
             row[f'Item_Price{suffix}'] = item['Item_Price']
+            row[f'Quantity{suffix}'] = item['Quantity'] # ADDED QUANTITY
         matrix_rows.append(row)
+        
     matrix_df = pd.DataFrame(matrix_rows)
+    
+    # Reorder columns logically
     base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     format_cols = []
     for i in range(1, 4):
-        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}'])
+        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Quantity{i}'])
+    
+    # Ensure columns exist before selecting
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
+
+# --- REVERSE LOGIC: MATRIX -> LINE ITEMS ---
+def reconstruct_lines_from_matrix(matrix_df):
+    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
+    
+    new_lines = []
+    
+    for _, row in matrix_df.iterrows():
+        # Base info
+        base_info = {
+            'Supplier_Name': row.get('Supplier_Name', ''),
+            'Collaborator': row.get('Collaborator', ''),
+            'Product_Name': row.get('Product_Name', ''),
+            'ABV': row.get('ABV', '')
+        }
+        
+        # Check for up to 3 formats
+        for i in range(1, 4):
+            fmt_key = f'Format{i}'
+            if fmt_key in row and pd.notna(row[fmt_key]) and str(row[fmt_key]).strip() != "":
+                line_item = base_info.copy()
+                line_item['Format'] = row.get(f'Format{i}', '')
+                line_item['Pack_Size'] = row.get(f'Pack_Size{i}', '')
+                line_item['Volume'] = row.get(f'Volume{i}', '')
+                line_item['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
+                line_item['Quantity'] = row.get(f'Quantity{i}', 0)
+                new_lines.append(line_item)
+                
+    return pd.DataFrame(new_lines)
 
 def create_product_checker(df):
     if df is None or df.empty: return pd.DataFrame()
@@ -141,7 +171,7 @@ with st.sidebar:
         if st.session_state.master_suppliers:
             st.success(f"Loaded {len(st.session_state.master_suppliers)} Master Suppliers")
         else:
-            st.warning("Master Supplier List not found (Check Sheets connection)")
+            st.warning("Master Supplier List not found")
             
         custom_rule = st.text_area("Inject Temporary Rule (The Lab):", height=100)
         submit_button = st.form_submit_button("🚀 Process Invoice", type="primary")
@@ -215,15 +245,15 @@ if uploaded_file and api_key and submit_button:
             # 1. Clean Names
             df_lines = clean_product_names(df_lines)
             
-            # 2. Normalize Suppliers (Fuzzy Match) - ONLY FOR LINE ITEMS
+            # 2. Normalize Suppliers
             if st.session_state.master_suppliers:
                 df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
-                # NOTE: We intentionally DO NOT update the Header 'Payable_To' anymore.
 
             cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
             existing = [c for c in cols if c in df_lines.columns]
             st.session_state.line_items = df_lines[existing]
             
+            # 3. Generate Matrix First
             st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
             st.session_state.checker_data = create_product_checker(st.session_state.line_items)
 
@@ -231,32 +261,59 @@ if uploaded_file and api_key and submit_button:
         st.error(f"Error: {e}")
 
 # ==========================================
-# 4. DISPLAY
+# 4. DISPLAY & EDITING
 # ==========================================
 
 if st.session_state.header_data is not None:
     if custom_rule:
         st.success("✅ Used Custom Rules")
-        try:
-            sup = st.session_state.header_data.iloc[0]['Payable_To']
+        try: sup = st.session_state.header_data.iloc[0]['Payable_To']
         except: sup = "Unknown"
         with st.expander("📩 Developer Snippet"):
             st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
-    t1, t2, t3, t4 = st.tabs(["Header", "Line Items", "Matrix", "Checker"])
+    # CHANGED: Matrix is now the first tab
+    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📄 Header", "📝 Line Items (Read Only)", "🔍 Checker"])
     
+    # --- TAB 1: MATRIX (MAIN EDITING AREA) ---
     with t1:
-        st.dataframe(st.session_state.header_data, use_container_width=True)
-        st.download_button("📥 CSV", st.session_state.header_data.to_csv(index=False), "header.csv")
+        st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
+        
+        # Editable Matrix
+        edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", use_container_width=True)
+        
+        colA, colB = st.columns([1, 4])
+        with colA:
+            if st.button("🔄 Sync & Regenerate"):
+                # 1. Save Matrix State
+                st.session_state.matrix_data = edited_matrix
+                
+                # 2. Reconstruct Line Items from Matrix
+                st.session_state.line_items = reconstruct_lines_from_matrix(edited_matrix)
+                
+                # 3. Reconstruct Checker from new Lines
+                st.session_state.checker_data = create_product_checker(st.session_state.line_items)
+                
+                st.success("All files synced with Matrix edits!")
+                st.rerun()
+        
+        with colB:
+            st.download_button("📥 Download Matrix CSV", edited_matrix.to_csv(index=False), "matrix.csv")
+
+    # --- TAB 2: HEADER ---
     with t2:
-        edited = st.data_editor(st.session_state.line_items, num_rows="dynamic", use_container_width=True)
-        st.download_button("📥 CSV", edited.to_csv(index=False), "lines.csv")
+        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", use_container_width=True)
+        st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
+        
+    # --- TAB 3: LINE ITEMS (Generated from Matrix) ---
     with t3:
-        if st.session_state.matrix_data is not None:
-            st.dataframe(st.session_state.matrix_data, use_container_width=True)
-            st.download_button("📥 CSV", st.session_state.matrix_data.to_csv(index=False), "matrix.csv")
+        st.caption("This data is generated automatically from your Matrix edits.")
+        st.dataframe(st.session_state.line_items, use_container_width=True)
+        st.download_button("📥 Download CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
+            
+    # --- TAB 4: CHECKER ---
     with t4:
         if st.session_state.checker_data is not None:
             st.dataframe(st.session_state.checker_data, use_container_width=True)
-            st.download_button("📥 CSV", st.session_state.checker_data.to_csv(index=False), "checker.csv")
+            st.download_button("📥 Download CSV", st.session_state.checker_data.to_csv(index=False), "checker.csv")
