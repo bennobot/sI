@@ -6,6 +6,7 @@ import google.generativeai as genai
 import json
 import re
 import io
+import time
 from streamlit_gsheets import GSheetsConnection
 from thefuzz import process
 from google.oauth2 import service_account
@@ -138,17 +139,14 @@ def get_drive_service():
             creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
         return build('drive', 'v3', credentials=creds)
-    else:
-        return None
+    return None
 
 def list_files_in_folder(folder_id):
     service = get_drive_service()
     if not service: return []
-    # Query: In folder, is PDF, not trashed
     query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
     results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
     files = results.get('files', [])
-    # SORT ALPHABETICALLY BY NAME
     files.sort(key=lambda x: x['name'].lower())
     return files
 
@@ -227,69 +225,71 @@ with st.sidebar:
 st.subheader("1. Select Invoice Source")
 tab_upload, tab_drive = st.tabs(["⬆️ Manual Upload", "☁️ Google Drive"])
 
-final_stream = None
+target_stream = None
 source_name = "Unknown"
 
 # --- TAB 1: MANUAL ---
 with tab_upload:
     uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
     if uploaded_file:
-        final_stream = uploaded_file
+        target_stream = uploaded_file
         source_name = uploaded_file.name
 
 # --- TAB 2: DRIVE ---
 with tab_drive:
     if st.session_state.drive_files:
-        # Create a clean list of names (SORTED)
         file_names = [f['name'] for f in st.session_state.drive_files]
-        
-        selected_name = st.selectbox(
-            "Select Invoice from Drive List:", 
-            options=file_names,
-            index=None,
-            placeholder="Choose a file..."
-        )
-        
+        selected_name = st.selectbox("Select Invoice from Drive List:", options=file_names, index=None, placeholder="Choose a file...")
         if selected_name:
+            # We don't download yet, just mark selection
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            st.info(f"Selected: **{selected_name}**")
+            
+            # Logic: If user selects from drive, we use that UNLESS they also just dropped a file in manual
+            if not uploaded_file:
+                source_name = selected_name
     else:
         st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
 
-# --- PROCESS BUTTON (GLOBAL) ---
+# --- PROCESS BUTTON ---
 if st.button("🚀 Process Invoice", type="primary"):
     
-    target_stream = None
-    
-    if uploaded_file:
-        target_stream = uploaded_file
-    elif st.session_state.selected_drive_id:
+    # 1. Download from Drive if needed (and no manual upload override)
+    if not uploaded_file and st.session_state.selected_drive_id:
         try:
-            with st.spinner(f"Downloading {st.session_state.selected_drive_name}..."):
+            with st.status(f"Downloading {source_name}...", expanded=False) as status:
                 target_stream = download_file_from_drive(st.session_state.selected_drive_id)
+                status.update(label="Download Complete", state="complete")
         except Exception as e:
             st.error(f"Download Failed: {e}")
-    else:
-        st.warning("⚠️ Please upload a file or select one from Google Drive first.")
+            st.stop()
 
     if target_stream and api_key:
         try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('models/gemini-2.5-flash')
-            
-            with st.spinner("AI Processing..."):
+            # === DEBUGGING STATUS BOX ===
+            with st.status("Processing Document...", expanded=True) as status:
+                
+                genai.configure(api_key=api_key)
+                # Fallback to stable model if 2.5 is acting up
+                # model = genai.GenerativeModel('gemini-1.5-flash') 
+                model = genai.GenerativeModel('models/gemini-2.5-flash')
+                
+                st.write("1. Converting PDF to Images (OCR Prep)...")
+                target_stream.seek(0)
                 images = convert_from_bytes(target_stream.read(), dpi=300)
+                
+                st.write(f"2. Extracting Text from {len(images)} pages...")
                 full_text = ""
-                for img in images:
+                for i, img in enumerate(images):
+                    st.write(f"   - Scanning page {i+1}...")
                     full_text += pytesseract.image_to_string(img) + "\n"
 
+                st.write("3. Sending Text to AI Model...")
                 injected = f"\n!!! USER OVERRIDE !!!\n{custom_rule}\n" if custom_rule else ""
 
                 prompt = f"""
                 Extract invoice data to JSON.
-                
                 STRUCTURE:
                 {{
                     "header": {{
@@ -304,18 +304,24 @@ if st.button("🚀 Process Invoice", type="primary"):
                         }}
                     ]
                 }}
-                
                 SUPPLIER RULEBOOK: {json.dumps(SUPPLIER_RULEBOOK)}
                 GLOBAL RULES: {GLOBAL_RULES_TEXT}
                 {injected}
-                
                 INVOICE TEXT:
                 {full_text}
                 """
 
                 response = model.generate_content(prompt)
-                json_text = response.text.strip().replace("```json", "").replace("```", "")
-                data = json.loads(json_text)
+                
+                st.write("4. Parsing Response...")
+                try:
+                    json_text = response.text.strip().replace("```json", "").replace("```", "")
+                    data = json.loads(json_text)
+                except Exception as e:
+                    st.error(f"AI returned invalid JSON: {response.text}")
+                    st.stop()
+                
+                st.write("5. Finalizing Data...")
                 
                 # --- POST PROCESSING ---
                 st.session_state.header_data = pd.DataFrame([data['header']])
@@ -331,9 +337,14 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
+                
+                status.update(label="Processing Complete!", state="complete", expanded=False)
 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Critical Error: {e}")
+            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
+    else:
+        st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
 # 4. DISPLAY
