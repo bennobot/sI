@@ -126,6 +126,12 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "Track Brewing Company Limited": """
+   FOR TRACK the style is listed in the product name after the last -
+   Don't include this in the product name
+   If the product name includes Dreaming Of... the next part is the hop variety and needs to be included in the product name
+   """,
+   
    "Little Mercies Limited": """
    For Little Mercies all bottles apart from Gift Boxes need to be adjusted to be pack size 1. The cost price needs to be recalculated to account for this 
    """,
