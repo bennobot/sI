@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (ACTIVE PRODUCTS ONLY)
+# 1. SHOPIFY ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -79,8 +79,9 @@ def fetch_shopify_products_by_vendor(vendor):
     }
     """
     search_vendor = vendor.replace("'", "\\'") 
-    # REVERTED: Added back "AND status:ACTIVE"
-    variables = {"query": f"vendor:'{search_vendor}' AND status:ACTIVE"}
+    
+    # CHANGED: Filter for ACTIVE OR DRAFT (Excludes Archived)
+    variables = {"query": f"vendor:'{search_vendor}' AND (status:ACTIVE OR status:DRAFT)"}
     
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
@@ -114,7 +115,7 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Searching Active Shopify Products for:** `{supplier}`")
+        logs.append(f"🔎 **Searching Shopify (Active/Draft) for:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
         logs.append(f"   -> Found {len(products)} products.")
@@ -136,33 +137,35 @@ def run_shopify_check(lines_df):
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
-            best_score = 0
-            best_prod = None
             
-            # REVERTED: Simple Fuzzy Match logic
+            # 1. Score ALL Candidates
+            scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 
-                # Logic: Parse L-Supplier / Product Name
+                # Parse L-Supplier / Product Name logic
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
+                # Fuzzy Match
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 
-                if score > best_score:
-                    best_score = score
-                    best_prod = prod
+                if score > 40:
+                    scored_candidates.append((score, prod))
             
-            if best_prod and best_score > 70:
-                logs.append(f"MATCH: `{inv_prod_name}` == `{best_prod['title']}` ({best_score}%)")
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            
+            # 2. Iterate through candidates
+            match_found = False
+            
+            for score, prod in scored_candidates:
+                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
                 
-                # Check Variants
-                variant_found = False
-                for v_edge in best_prod['variants']['edges']:
+                for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     
@@ -179,16 +182,20 @@ def run_shopify_check(lines_df):
                     if pack_ok and vol_ok:
                         logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
                         found_id = variant['id']
-                        variant_found = True
+                        status = "✅ Matched"
+                        match_found = True
                         break
                     else:
                         logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
                 
-                if variant_found: status = "✅ Matched"
-                else: status = "❌ Size Missing"
-            else:
-                status = "🆕 New Product"
-                logs.append(f"  - No match for `{inv_prod_name}`. Best was {best_score}%")
+                if match_found: break
+            
+            if not match_found:
+                if scored_candidates:
+                    status = "❌ Size Missing"
+                else:
+                    status = "🆕 New Product"
+                    logs.append(f"  - No match for `{inv_prod_name}`. Best was {scored_candidates[0][0] if scored_candidates else 0}%")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
@@ -324,6 +331,7 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
+# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -492,6 +500,7 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
+            st.warning("Try refreshing. If 2.5 hangs, consider falling back to 1.5.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
