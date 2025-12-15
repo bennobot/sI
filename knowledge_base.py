@@ -126,6 +126,12 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "The Beak Brewery Limited": """
+   the abv and style is at the end of the product name - this needs removing
+   The item price is is the line price divided by the quantity
+   firkin is always 9 Gallon for volume
+   """,
+   
    "Track Brewing Company Limited": """
    FOR TRACK the style is listed in the product name after the last -
    Don't include this in the product name
