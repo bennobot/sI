@@ -8,6 +8,7 @@ import re
 import io
 import requests
 import time
+from urllib.parse import quote
 from streamlit_gsheets import GSheetsConnection
 from thefuzz import process, fuzz
 from google.oauth2 import service_account
