@@ -6,9 +6,10 @@ import google.generativeai as genai
 import json
 import re
 import io
-import requests  # New library for Shopify API calls
+import requests
+import time
 from streamlit_gsheets import GSheetsConnection
-from thefuzz import process
+from thefuzz import process, fuzz
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -39,53 +40,200 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY FUNCTIONS (NEW)
+# 1. SHOPIFY RECONCILIATION ENGINE (NEW)
 # ==========================================
 
-def test_shopify_connection():
-    """Checks if the Shopify secrets are valid."""
-    if "shopify" not in st.secrets:
-        return False, "Missing [shopify] section in secrets.toml"
+def fetch_shopify_products_by_vendor(vendor):
+    """Queries Shopify GraphQL for all products by a specific Vendor."""
+    if "shopify" not in st.secrets: return []
     
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
     
-    if not shop_url or not token:
-        return False, "Missing shop_url or access_token in secrets."
-
-    # Construct GraphQL Endpoint
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # Simple Query: Get Shop Name
+    # Query: Get Products + Variants + Metafields (Adjust namespace/key as needed)
     query = """
-    {
-      shop {
-        name
-        currencyCode
+    query ($query: String!) {
+      products(first: 50, query: $query) {
+        edges {
+          node {
+            id
+            title
+            status
+            variants(first: 20) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  inventoryQuantity
+                  # Attempt to fetch standard sizing metafields
+                  pack_size: metafield(namespace: "custom", key: "pack_size") { value }
+                  volume: metafield(namespace: "custom", key: "volume") { value }
+                  format: metafield(namespace: "custom", key: "format") { value }
+                }
+              }
+            }
+          }
+        }
       }
     }
     """
     
+    # Cleaning vendor name for search syntax
+    search_vendor = vendor.replace("'", "\\'") 
+    variables = {"query": f"vendor:'{search_vendor}' AND status:ACTIVE"}
+    
     try:
-        headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-        response = requests.post(endpoint, json={"query": query}, headers=headers)
-        
+        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "errors" in data:
-                return False, f"GraphQL Error: {data['errors'][0]['message']}"
-            shop_name = data["data"]["shop"]["name"]
-            return True, f"Connected to: {shop_name} ({data['data']['shop']['currencyCode']})"
-        else:
-            return False, f"HTTP Error {response.status_code}: {response.text}"
+            if "data" in data and "products" in data["data"]:
+                return data["data"]["products"]["edges"]
+    except:
+        pass
+    return []
+
+def parse_variant_attributes(variant_node):
+    """
+    Tries to determine Pack Size, Volume, and Format from a Shopify Variant.
+    Priority: Metafields -> Regex on Title -> Defaults
+    """
+    v = variant_node
+    title = v['title'].lower()
+    
+    # 1. Try Metafields
+    pack = v.get('pack_size', {}).get('value') if v.get('pack_size') else None
+    vol = v.get('volume', {}).get('value') if v.get('volume') else None
+    fmt = v.get('format', {}).get('value') if v.get('format') else None
+    
+    # 2. Fallback to Regex on Title (e.g. "24 x 440ml Can")
+    if not pack:
+        # Look for "24 x" or "12 pack"
+        pack_match = re.search(r'(\d+)\s*x', title)
+        if not pack_match: pack_match = re.search(r'(\d+)\s*pack', title)
+        if pack_match: pack = pack_match.group(1)
+        else: pack = "1" # Default to single unit
+        
+    if not vol:
+        # Look for "440ml", "44cl", "30l"
+        vol_match = re.search(r'(\d+)(ml|cl|l|g)', title)
+        if vol_match: vol = f"{vol_match.group(1)}{vol_match.group(2)}"
+        
+    if not fmt:
+        if "keg" in title: fmt = "Keg"
+        elif "cask" in title or "firkin" in title: fmt = "Cask"
+        elif "can" in title: fmt = "Can"
+        elif "bottle" in title: fmt = "Bottle"
+        
+    return str(pack), str(vol), str(fmt)
+
+def normalize_vol(v_str):
+    """Normalizes volumes for comparison (e.g. 440ml == 44cl)"""
+    if not v_str: return "0"
+    v_str = v_str.lower().strip()
+    nums = re.findall(r'\d+', v_str)
+    if not nums: return "0"
+    val = float(nums[0])
+    
+    if "ml" in v_str: val = val / 10
+    elif "l" in v_str and "ml" not in v_str and "cl" not in v_str: val = val * 100
+    
+    return str(int(val)) # Return in cl (approx)
+
+def run_shopify_check(matrix_df):
+    """Main Logic to compare Matrix Rows vs Shopify Data"""
+    if matrix_df.empty: return matrix_df
+    
+    # Create new columns
+    matrix_df['Shopify_Status'] = "Pending"
+    matrix_df['Shopify_ID'] = ""
+    
+    # Get unique suppliers
+    suppliers = matrix_df['Supplier_Name'].unique()
+    
+    # Cache Shopify Data in memory
+    shopify_cache = {}
+    progress_bar = st.progress(0)
+    
+    for i, supplier in enumerate(suppliers):
+        progress_bar.progress((i)/len(suppliers))
+        products = fetch_shopify_products_by_vendor(supplier)
+        shopify_cache[supplier] = products
+        
+    progress_bar.progress(1.0)
+    
+    # Iterate Rows
+    results = []
+    for _, row in matrix_df.iterrows():
+        status = "❓ Vendor Not Found"
+        shop_id = ""
+        
+        supplier = row['Supplier_Name']
+        prod_name = row['Product_Name']
+        
+        # Check Formats (Matrix has Format1, Format2...)
+        # We process Format 1 for the main match check (Primary Format)
+        fmt = row.get('Format1', '')
+        pack = str(row.get('Pack_Size1', '1')).replace('.0', '')
+        if pack == "" or pack == "nan": pack = "1"
+        vol = row.get('Volume1', '')
+        
+        if supplier in shopify_cache and shopify_cache[supplier]:
+            potential_products = shopify_cache[supplier]
             
-    except Exception as e:
-        return False, f"Connection Exception: {str(e)}"
+            best_score = 0
+            best_prod = None
+            
+            # Fuzzy Match Name First
+            for p_edge in potential_products:
+                p = p_edge['node']
+                score = fuzz.token_sort_ratio(prod_name, p['title'])
+                
+                if score > best_score:
+                    best_score = score
+                    best_prod = p
+            
+            if best_prod:
+                # Now Check Variants for Size Match
+                size_match = False
+                for v_edge in best_prod['variants']['edges']:
+                    v = v_edge['node']
+                    s_pack, s_vol, s_fmt = parse_variant_attributes(v)
+                    
+                    # Normalize for comparison
+                    inv_vol_norm = normalize_vol(vol)
+                    shop_vol_norm = normalize_vol(s_vol)
+                    
+                    # Check Match (Simple Logic: Pack and Volume must roughly match)
+                    if s_pack == pack and inv_vol_norm == shop_vol_norm:
+                        size_match = True
+                        shop_id = v['id'] # Store Variant ID
+                        break
+                
+                if best_score >= 90 and size_match:
+                    status = "✅ Exact Match"
+                elif best_score >= 80 and size_match:
+                    status = "⚠️ Fuzzy Match"
+                elif best_score >= 90 and not size_match:
+                    status = "❌ Size Mismatch"
+                else:
+                    status = "🆕 New Product"
+            else:
+                status = "🆕 New Product"
+        
+        row['Shopify_Status'] = status
+        row['Shopify_ID'] = shop_id
+        results.append(row)
+        
+    return pd.DataFrame(results)
 
 # ==========================================
-# 2. DATA FUNCTIONS
+# 2. EXISTING DATA FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -232,15 +380,6 @@ with st.sidebar:
 
     st.info("Logic loaded from `knowledge_base.py`")
     
-    st.divider()
-    # --- SHOPIFY TEST ---
-    if st.button("🛒 Test Shopify Connection"):
-        success, msg = test_shopify_connection()
-        if success:
-            st.success(msg)
-        else:
-            st.error(msg)
-            
     # --- DRIVE SCANNER ---
     st.divider()
     st.subheader("📂 Google Drive")
@@ -390,6 +529,7 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
+            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
@@ -410,6 +550,15 @@ if st.session_state.header_data is not None:
     
     with t1:
         st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
+        
+        # --- SHOPIFY CHECK BUTTON ---
+        if "shopify" in st.secrets:
+            if st.button("🛒 Check Shopify Inventory"):
+                with st.spinner("Checking Shopify..."):
+                    updated_matrix = run_shopify_check(st.session_state.matrix_data)
+                    st.session_state.matrix_data = updated_matrix
+                    st.success("Shopify Check Complete!")
+        
         edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", use_container_width=True)
         colA, colB = st.columns([1, 4])
         with colA:
