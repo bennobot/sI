@@ -140,10 +140,10 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Searching ALL Shopify Products for:** `{supplier}`")
+        logs.append(f"🔎 **Searching Shopify (Active/Draft) for:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"   -> Found {len(products)} total products (Active/Draft/Archived).")
+        logs.append(f"   -> Found {len(products)} products.")
         
     progress_bar.progress(1.0)
     
@@ -162,10 +162,9 @@ def run_shopify_check(lines_df):
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
-            best_score = 0
-            best_prod = None
             
-            # Fuzzy Match
+            # 1. Score ALL Candidates
+            scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
@@ -179,16 +178,18 @@ def run_shopify_check(lines_df):
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 
-                if score > best_score:
-                    best_score = score
-                    best_prod = prod
+                if score > 40:
+                    scored_candidates.append((score, prod))
             
-            if best_prod and best_score > 70:
-                logs.append(f"MATCH: `{inv_prod_name}` == `{best_prod['title']}` ({best_score}%)")
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            
+            # --- FIX: Initialize match_found BEFORE the loop ---
+            match_found = False
+            
+            for score, prod in scored_candidates:
+                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
                 
-                # Check Variants
-                variant_found = False
-                for v_edge in best_prod['variants']['edges']:
+                for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     
@@ -211,11 +212,14 @@ def run_shopify_check(lines_df):
                     else:
                         logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
                 
-                if not match_found:
+                if match_found: break
+            
+            if not match_found:
+                if scored_candidates:
                     status = "❌ Size Missing"
-            else:
-                status = "🆕 New Product"
-                logs.append(f"  - No match for `{inv_prod_name}`. Best was {best_score}%")
+                else:
+                    status = "🆕 New Product"
+                    logs.append(f"  - No match for `{inv_prod_name}`. Best was {scored_candidates[0][0] if scored_candidates else 0}%")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
