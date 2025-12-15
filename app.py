@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (WITH PAGINATION)
+# 1. SHOPIFY ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -53,7 +53,6 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # GraphQL Query with Pagination Variables
     query = """
     query ($query: String!, $cursor: String) {
       products(first: 50, query: $query, after: $cursor) {
@@ -85,29 +84,25 @@ def fetch_shopify_products_by_vendor(vendor):
     """
     
     search_vendor = vendor.replace("'", "\\'") 
-    # Search everything (Active, Draft, Archived)
-    search_query = f"vendor:'{search_vendor}'"
+    variables = {"query": f"vendor:'{search_vendor}'"}
     
     all_products = []
     cursor = None
     has_next = True
     
     while has_next:
-        variables = {"query": search_query, "cursor": cursor}
+        vars_with_cursor = variables.copy()
+        if cursor: vars_with_cursor['cursor'] = cursor
+            
         try:
-            response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+            response = requests.post(endpoint, json={"query": query, "variables": vars_with_cursor}, headers=headers)
             if response.status_code == 200:
                 data = response.json()
                 if "data" in data and "products" in data["data"]:
-                    
-                    # Add products to list
-                    products_data = data["data"]["products"]
-                    all_products.extend(products_data["edges"])
-                    
-                    # Pagination Logic
-                    page_info = products_data["pageInfo"]
-                    has_next = page_info["hasNextPage"]
-                    cursor = page_info["endCursor"]
+                    p_data = data["data"]["products"]
+                    all_products.extend(p_data["edges"])
+                    has_next = p_data["pageInfo"]["hasNextPage"]
+                    cursor = p_data["pageInfo"]["endCursor"]
                 else:
                     has_next = False
             else:
@@ -183,43 +178,43 @@ def run_shopify_check(lines_df):
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             
-            # --- FIX: Initialize match_found BEFORE the loop ---
+            # 2. Iterate through candidates until match found
             match_found = False
             
-            for score, prod in scored_candidates:
-                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
+            if scored_candidates:
+                for score, prod in scored_candidates:
+                    logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
+                    
+                    for v_edge in prod['variants']['edges']:
+                        variant = v_edge['node']
+                        v_title = variant['title'].lower()
+                        
+                        pack_ok = False
+                        if inv_pack == "1":
+                            if " x " not in v_title: pack_ok = True
+                        else:
+                            if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                        
+                        vol_ok = False
+                        if inv_vol in v_title: vol_ok = True
+                        if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                        
+                        if pack_ok and vol_ok:
+                            logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
+                            found_id = variant['id']
+                            status = "✅ Matched"
+                            match_found = True
+                            break
+                        else:
+                            logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
+                    
+                    if match_found: break
                 
-                for v_edge in prod['variants']['edges']:
-                    variant = v_edge['node']
-                    v_title = variant['title'].lower()
-                    
-                    pack_ok = False
-                    if inv_pack == "1":
-                        if " x " not in v_title: pack_ok = True
-                    else:
-                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
-                    
-                    vol_ok = False
-                    if inv_vol in v_title: vol_ok = True
-                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
-                    
-                    if pack_ok and vol_ok:
-                        logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
-                        found_id = variant['id']
-                        status = "✅ Matched"
-                        match_found = True
-                        break
-                    else:
-                        logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
-                
-                if match_found: break
-            
-            if not match_found:
-                if scored_candidates:
+                if not match_found:
                     status = "❌ Size Missing"
-                else:
-                    status = "🆕 New Product"
-                    logs.append(f"  - No match for `{inv_prod_name}`. Best was {scored_candidates[0][0] if scored_candidates else 0}%")
+            else:
+                status = "🆕 New Product"
+                logs.append(f"  - No match for `{inv_prod_name}`.")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
