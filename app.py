@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY RECONCILIATION ENGINE
+# 1. SHOPIFY ENGINE (DEEP DEBUG MODE)
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -100,10 +100,6 @@ def normalize_vol_string(v_str):
     return str(int(val))
 
 def run_shopify_check(lines_df):
-    """
-    Checks line items against Shopify.
-    Handles 'L-Supplier / Product / ABV / Format' title structure.
-    """
     if lines_df.empty: return lines_df, ["No Lines to check."]
     
     logs = []
@@ -117,10 +113,10 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"**Searching Vendor:** `{supplier}`")
+        logs.append(f"🔎 **Fetching Shopify Data for:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f" -> Found {len(products)} products.")
+        logs.append(f"   -> Retrieved {len(products)} active products.")
         
     progress_bar.progress(1.0)
     
@@ -134,42 +130,48 @@ def run_shopify_check(lines_df):
         inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         inv_vol = normalize_vol_string(row.get('Volume', ''))
+        
+        logs.append(f"--- Checking Item: **{inv_prod_name}** (Pack:{inv_pack} Vol:{inv_vol}) ---")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             best_score = 0
             best_prod = None
             
+            # 1. Score Candidates
+            scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 
-                # --- NEW LOGIC: PARSE SHOPIFY TITLE STRUCTURE ---
-                # Expected format: "L-Supplier / Product Name / ABV / Format"
+                # Logic: Parse L-Supplier / Product Name
                 shop_prod_name_clean = shop_title_full
-                
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
-                    # Usually Product Name is index 1
-                    if len(parts) >= 2:
-                        shop_prod_name_clean = parts[1]
+                    if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
-                # Fuzzy Match
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
+                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 
-                # Boost if exact substring
-                if inv_prod_name.lower() in shop_prod_name_clean.lower():
-                    score += 10
-                
-                if score > best_score:
-                    best_score = score
-                    best_prod = prod
+                if score > 40: # Only log relevant ones
+                    scored_candidates.append((score, prod['title'], prod))
             
+            # Sort by score
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            
+            # Log top candidates
+            if scored_candidates:
+                best_score, best_title, best_prod = scored_candidates[0]
+                logs.append(f"   Top Match: `{best_title}` (Score: {best_score}%)")
+                for s, t, _ in scored_candidates[1:3]:
+                    logs.append(f"   - Candidate: `{t}` ({s}%)")
+            else:
+                logs.append("   - No similar product names found.")
+
+            # 2. Check Variants if score is good
             if best_prod and best_score > 70:
-                logs.append(f"MATCH: `{inv_prod_name}` == `{best_prod['title']}` ({best_score}%)")
-                
-                # Check Variants
                 variant_found = False
+                
                 for v_edge in best_prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
@@ -185,22 +187,25 @@ def run_shopify_check(lines_df):
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
                     if pack_ok and vol_ok:
+                        logs.append(f"   ✅ **MATCHED VARIANT**: `{variant['title']}`")
                         variant_found = True
                         found_id = variant['id']
                         break
                     else:
-                        logs.append(f"  - Variant `{v_title}` failed size check (Need {inv_pack}x / {inv_vol})")
+                        fail_reason = []
+                        if not pack_ok: fail_reason.append(f"Pack {inv_pack} not found")
+                        if not vol_ok: fail_reason.append(f"Vol {inv_vol} not found")
+                        logs.append(f"   ❌ Variant `{variant['title']}` rejected: {', '.join(fail_reason)}")
                 
                 if variant_found: status = "✅ Matched"
                 else: status = "❌ Size Missing"
             else:
                 status = "🆕 New Product"
-                logs.append(f"  - No match for `{inv_prod_name}`. Best was {best_score}%")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
         results.append(row)
-        
+    
     return pd.DataFrame(results), logs
 
 # ==========================================
@@ -331,6 +336,7 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
+# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -499,7 +505,7 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
+            st.warning("Try refreshing. If 2.5 hangs, consider falling back to 1.5.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
