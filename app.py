@@ -7,15 +7,17 @@ import json
 import re
 import io
 import requests
-import time
 from streamlit_gsheets import GSheetsConnection
-from thefuzz import process, fuzz
+from thefuzz import process
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# Import the Brain
+# Import the Knowledge Base
 from knowledge_base import GLOBAL_RULES_TEXT, SUPPLIER_RULEBOOK
+
+# Import the Shopify Logic
+from shopify_engine import run_shopify_check
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
 
@@ -40,195 +42,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (WITH PAGINATION)
-# ==========================================
-
-def fetch_shopify_products_by_vendor(vendor):
-    if "shopify" not in st.secrets: return []
-    creds = st.secrets["shopify"]
-    shop_url = creds.get("shop_url")
-    token = creds.get("access_token")
-    version = creds.get("api_version", "2024-04")
-    
-    endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
-    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    
-    # GraphQL Query with Pagination Variables
-    query = """
-    query ($query: String!, $cursor: String) {
-      products(first: 50, query: $query, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        edges {
-          node {
-            id
-            title
-            status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            variants(first: 20) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  inventoryQuantity
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    search_vendor = vendor.replace("'", "\\'") 
-    # Search everything (Active, Draft, Archived)
-    search_query = f"vendor:'{search_vendor}'"
-    
-    all_products = []
-    cursor = None
-    has_next = True
-    
-    while has_next:
-        variables = {"query": search_query, "cursor": cursor}
-        try:
-            response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                if "data" in data and "products" in data["data"]:
-                    
-                    # Add products to list
-                    products_data = data["data"]["products"]
-                    all_products.extend(products_data["edges"])
-                    
-                    # Pagination Logic
-                    page_info = products_data["pageInfo"]
-                    has_next = page_info["hasNextPage"]
-                    cursor = page_info["endCursor"]
-                else:
-                    has_next = False
-            else:
-                has_next = False
-        except:
-            has_next = False
-            
-    return all_products
-
-def normalize_vol_string(v_str):
-    if not v_str: return "0"
-    v_str = str(v_str).lower().strip()
-    nums = re.findall(r'\d+', v_str)
-    if not nums: return "0"
-    val = float(nums[0])
-    if "ml" in v_str: val = val / 10
-    return str(int(val))
-
-def run_shopify_check(lines_df):
-    if lines_df.empty: return lines_df, ["No Lines to check."]
-    
-    logs = []
-    df = lines_df.copy()
-    df['Shopify_Status'] = "Pending"
-    df['Shopify_Variant_ID'] = ""
-    
-    suppliers = df['Supplier_Name'].unique()
-    shopify_cache = {}
-    
-    progress_bar = st.progress(0)
-    for i, supplier in enumerate(suppliers):
-        progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Searching Shopify (Active/Draft) for:** `{supplier}`")
-        products = fetch_shopify_products_by_vendor(supplier)
-        shopify_cache[supplier] = products
-        logs.append(f"   -> Found {len(products)} products.")
-        
-    progress_bar.progress(1.0)
-    
-    results = []
-    for _, row in df.iterrows():
-        status = "❓ Vendor Not Found"
-        found_id = ""
-        
-        supplier = row['Supplier_Name']
-        inv_prod_name = row['Product_Name']
-        inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
-        if inv_pack in ["", "nan", "0"]: inv_pack = "1"
-        inv_vol = normalize_vol_string(row.get('Volume', ''))
-        
-        logs.append(f"--- Checking Item: **{inv_prod_name}** (Pack:{inv_pack} Vol:{inv_vol}) ---")
-
-        if supplier in shopify_cache and shopify_cache[supplier]:
-            candidates = shopify_cache[supplier]
-            
-            # 1. Score ALL Candidates
-            scored_candidates = []
-            for edge in candidates:
-                prod = edge['node']
-                shop_title_full = prod['title']
-                
-                # Logic: Parse L-Supplier / Product Name
-                shop_prod_name_clean = shop_title_full
-                if "/" in shop_title_full:
-                    parts = [p.strip() for p in shop_title_full.split("/")]
-                    if len(parts) >= 2: shop_prod_name_clean = parts[1]
-                
-                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
-                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
-                
-                if score > 40:
-                    scored_candidates.append((score, prod))
-            
-            scored_candidates.sort(key=lambda x: x[0], reverse=True)
-            
-            # --- FIX: Initialize match_found BEFORE the loop ---
-            match_found = False
-            
-            for score, prod in scored_candidates:
-                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
-                
-                for v_edge in prod['variants']['edges']:
-                    variant = v_edge['node']
-                    v_title = variant['title'].lower()
-                    
-                    pack_ok = False
-                    if inv_pack == "1":
-                        if " x " not in v_title: pack_ok = True
-                    else:
-                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
-                    
-                    vol_ok = False
-                    if inv_vol in v_title: vol_ok = True
-                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
-                    
-                    if pack_ok and vol_ok:
-                        logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
-                        found_id = variant['id']
-                        status = "✅ Matched"
-                        match_found = True
-                        break
-                    else:
-                        logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
-                
-                if match_found: break
-            
-            if not match_found:
-                if scored_candidates:
-                    status = "❌ Size Missing"
-                else:
-                    status = "🆕 New Product"
-                    logs.append(f"  - No match for `{inv_prod_name}`. Best was {scored_candidates[0][0] if scored_candidates else 0}%")
-        
-        row['Shopify_Status'] = status
-        row['Shopify_Variant_ID'] = found_id
-        results.append(row)
-    
-    return pd.DataFrame(results), logs
-
-# ==========================================
-# 2. DATA & DRIVE FUNCTIONS
+# 1. DATA & DRIVE FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -355,7 +169,6 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
-# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -430,7 +243,6 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -524,7 +336,6 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
