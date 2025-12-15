@@ -7,6 +7,7 @@ import json
 import re
 import io
 import requests
+import time
 from streamlit_gsheets import GSheetsConnection
 from thefuzz import process, fuzz
 from google.oauth2 import service_account
@@ -39,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (DEBUG MODE)
+# 1. SHOPIFY RECONCILIATION ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -99,35 +100,32 @@ def normalize_vol_string(v_str):
     return str(int(val))
 
 def run_shopify_check(lines_df):
-    if lines_df.empty: return lines_df
+    if lines_df.empty: return lines_df.copy()
     
-    # Debug Container
-    log_container = st.expander("🕵️ Shopify Debug Logs", expanded=True)
-    logs = []
+    # Fix SettingWithCopyWarning
+    df = lines_df.copy()
+    df['Shopify_Status'] = "Pending"
+    df['Shopify_Variant_ID'] = ""
     
-    lines_df['Shopify_Status'] = "Pending"
-    lines_df['Shopify_Variant_ID'] = ""
-    
-    suppliers = lines_df['Supplier_Name'].unique()
+    suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"**Searching Vendor:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"-> Found {len(products)} products.")
-        
     progress_bar.progress(1.0)
     
     results = []
-    for _, row in lines_df.iterrows():
+    for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
         found_id = ""
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
+        
+        inv_fmt = str(row.get('Format', '')).lower()
         inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         inv_vol = normalize_vol_string(row.get('Volume', ''))
@@ -137,7 +135,6 @@ def run_shopify_check(lines_df):
             best_score = 0
             best_prod = None
             
-            # Fuzzy Match
             for edge in candidates:
                 prod = edge['node']
                 score = fuzz.token_sort_ratio(inv_prod_name, prod['title'])
@@ -146,42 +143,42 @@ def run_shopify_check(lines_df):
                     best_prod = prod
             
             if best_prod and best_score > 75:
-                logs.append(f"MATCH: `{inv_prod_name}` == `{best_prod['title']}` ({best_score}%)")
+                shop_fmt = best_prod.get('format_meta', {})
+                shop_fmt_val = shop_fmt.get('value', '').lower() if shop_fmt else ""
                 
-                # Check Variants
-                variant_found = False
-                for v_edge in best_prod['variants']['edges']:
-                    variant = v_edge['node']
-                    v_title = variant['title'].lower()
-                    
-                    pack_ok = False
-                    if inv_pack == "1":
-                        if " x " not in v_title: pack_ok = True
-                    else:
-                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
-                    
-                    vol_ok = False
-                    if inv_vol in v_title: vol_ok = True
-                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
-                    
-                    if pack_ok and vol_ok:
-                        variant_found = True
-                        found_id = variant['id']
-                        break
-                    else:
-                        logs.append(f"  - Variant `{v_title}` failed size check (Need {inv_pack}x / {inv_vol})")
+                fmt_match = (inv_fmt in shop_fmt_val) or (shop_fmt_val in inv_fmt)
                 
-                if variant_found: status = "✅ Matched"
-                else: status = "❌ Size Missing"
-            else:
-                status = "🆕 New Product"
-                logs.append(f"  - No fuzzy match for `{inv_prod_name}`")
+                if fmt_match or not shop_fmt_val: 
+                    variant_found = False
+                    for v_edge in best_prod['variants']['edges']:
+                        variant = v_edge['node']
+                        v_title = variant['title'].lower()
+                        
+                        pack_ok = False
+                        if inv_pack == "1":
+                            if " x " not in v_title: pack_ok = True
+                        else:
+                            if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title:
+                                pack_ok = True
+                        
+                        vol_ok = False
+                        if inv_vol in v_title: vol_ok = True
+                        if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                        
+                        if pack_ok and vol_ok:
+                            variant_found = True
+                            found_id = variant['id']
+                            break
+                    
+                    if variant_found: status = "✅ Matched"
+                    else: status = "❌ Size Missing"
+                else: status = "⚠️ Format Mismatch"
+            else: status = "🆕 New Product"
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
         results.append(row)
-    
-    log_container.markdown("\n".join(logs))
+        
     return pd.DataFrame(results)
 
 # ==========================================
@@ -285,8 +282,7 @@ def get_drive_service():
             creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
         return build('drive', 'v3', credentials=creds)
-    else:
-        return None
+    return None
 
 def list_files_in_folder(folder_id):
     service = get_drive_service()
@@ -313,6 +309,7 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
+# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -386,6 +383,7 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
+            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -476,7 +474,6 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("Try refreshing. If 2.5 hangs, consider falling back to 1.5.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
@@ -497,7 +494,8 @@ if st.session_state.header_data is not None:
     
     with t1:
         st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
-        edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", use_container_width=True)
+        
+        edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000)
         colA, colB = st.columns([1, 4])
         with colA:
             if st.button("🔄 Sync & Regenerate"):
@@ -510,7 +508,7 @@ if st.session_state.header_data is not None:
             st.download_button("📥 Download CSV", edited_matrix.to_csv(index=False), "matrix.csv")
 
     with t2:
-        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", use_container_width=True)
+        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
     with t3:
         st.subheader("Line Items")
@@ -522,9 +520,9 @@ if st.session_state.header_data is not None:
                     st.success("Check Complete!")
                     st.rerun()
                     
-        edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", use_container_width=True)
+        edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
         st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
     with t4:
         if st.session_state.checker_data is not None:
-            st.dataframe(st.session_state.checker_data, use_container_width=True)
+            st.dataframe(st.session_state.checker_data, width=1000)
             st.download_button("📥 Download CSV", st.session_state.checker_data.to_csv(index=False), "checker.csv")
