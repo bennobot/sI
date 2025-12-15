@@ -77,7 +77,7 @@ def fetch_shopify_products_by_vendor(vendor):
     }
     """
     search_vendor = vendor.replace("'", "\\'") 
-    variables = {"query": f"vendor:'{search_vendor}' AND status:ACTIVE"}
+    variables = {"query": f"vendor:'{search_vendor}'"}
     
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
