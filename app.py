@@ -116,10 +116,10 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Searching Shopify Vendor:** `{supplier}`")
+        logs.append(f"🔎 **Fetching Shopify Data for:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"   -> Found {len(products)} products.")
+        logs.append(f"   -> Retrieved {len(products)} active products.")
         
     progress_bar.progress(1.0)
     
@@ -139,23 +139,30 @@ def run_shopify_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             
-            # 1. Score ALL Candidates
+            # 1. Score ALL Candidates (Improved Matching)
             scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 
-                # Logic: Parse L-Supplier / Product Name
-                shop_prod_name_clean = shop_title_full
-                if "/" in shop_title_full:
-                    parts = [p.strip() for p in shop_title_full.split("/")]
-                    if len(parts) >= 2: shop_prod_name_clean = parts[1]
+                # CLEAN SHOPIFY TITLE
+                # Attempt to split by common separators
+                clean_title = shop_title_full
+                for sep in [" / ", " - ", "|"]:
+                    if sep in shop_title_full:
+                        parts = shop_title_full.split(sep)
+                        # Heuristic: The product name is usually the 2nd item if there are >2 parts
+                        # e.g. "G-Holy Goat / Goatfire / ..." -> "Goatfire"
+                        if len(parts) >= 2:
+                            clean_title = parts[1] 
+                        break
                 
-                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
-                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
+                # USE TOKEN SET RATIO (Matches substrings perfectly)
+                # "Goatfire" vs "Goatfire Pale Ale" = 100
+                score = fuzz.token_set_ratio(inv_prod_name, clean_title)
                 
-                if score > 40: # Wide net
-                    scored_candidates.append((score, prod))
+                if score > 60: # Lower threshold, rely on variant check to filter
+                    scored_candidates.append((score, prod, clean_title))
             
             # Sort by score
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
@@ -163,8 +170,8 @@ def run_shopify_check(lines_df):
             # 2. Iterate through candidates until match found
             match_found = False
             
-            for score, prod in scored_candidates:
-                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
+            for score, prod, clean_name in scored_candidates:
+                logs.append(f"   Checking Candidate: `{prod['title']}` (Match Score: {score}%)")
                 
                 # Check Variants
                 for v_edge in prod['variants']['edges']:
@@ -188,15 +195,17 @@ def run_shopify_check(lines_df):
                         match_found = True
                         break
                     else:
-                        logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
+                        # Log failure reason for debug
+                        logs.append(f"      ❌ Variant `{variant['title']}` rejected (Pack:{pack_ok} Vol:{vol_ok})")
                 
-                if match_found: break # Stop checking other products
+                if match_found: break
             
             if not match_found:
                 if scored_candidates:
-                    status = "❌ Size Missing" # Found name, but no variant matched size
+                    status = "❌ Size Missing" 
                 else:
-                    status = "🆕 New Product" # No name match found
+                    status = "🆕 New Product"
+                    logs.append("   - No similar product names found.")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
