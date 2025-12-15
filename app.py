@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY RECONCILIATION ENGINE
+# 1. SHOPIFY ENGINE (DEBUGGING ENABLED)
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -100,7 +100,9 @@ def normalize_vol_string(v_str):
     return str(int(val))
 
 def run_shopify_check(lines_df):
-    if lines_df.empty: return lines_df.copy()
+    if lines_df.empty: return lines_df, ["No Lines to check."]
+    
+    logs = []
     
     df = lines_df.copy()
     df['Shopify_Status'] = "Pending"
@@ -112,8 +114,11 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
+        logs.append(f"**Searching Vendor:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
+        logs.append(f" -> Found {len(products)} products.")
+        
     progress_bar.progress(1.0)
     
     results = []
@@ -142,6 +147,8 @@ def run_shopify_check(lines_df):
                     best_prod = prod
             
             if best_prod and best_score > 75:
+                logs.append(f"MATCH: `{inv_prod_name}` == `{best_prod['title']}` ({best_score}%)")
+                
                 shop_fmt = best_prod.get('format_meta', {})
                 shop_fmt_val = shop_fmt.get('value', '').lower() if shop_fmt else ""
                 
@@ -168,17 +175,23 @@ def run_shopify_check(lines_df):
                             variant_found = True
                             found_id = variant['id']
                             break
+                        else:
+                            logs.append(f"  - Variant `{v_title}` failed. Needed Pack `{inv_pack}` & Vol `{inv_vol}`.")
                     
                     if variant_found: status = "✅ Matched"
                     else: status = "❌ Size Missing"
-                else: status = "⚠️ Format Mismatch"
-            else: status = "🆕 New Product"
+                else: 
+                    status = "⚠️ Format Mismatch"
+                    logs.append(f"  - Format mismatch: Inv=`{inv_fmt}` vs Shop=`{shop_fmt_val}`")
+            else:
+                status = "🆕 New Product"
+                logs.append(f"  - No match for `{inv_prod_name}`. Best was {best_score}%")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
         results.append(row)
         
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), logs
 
 # ==========================================
 # 2. DATA & DRIVE FUNCTIONS
@@ -317,6 +330,7 @@ if 'master_suppliers' not in st.session_state: st.session_state.master_suppliers
 if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
 if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
+if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
 
 with st.sidebar:
     st.header("Settings")
@@ -331,7 +345,6 @@ with st.sidebar:
     st.divider()
     st.subheader("📂 Google Drive")
     folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
-    
     if st.button("🔍 Scan Folder"):
         if folder_id:
             try:
@@ -382,7 +395,6 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -462,14 +474,15 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
-                # Ensure base columns exist
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
-                # Create Derived Tables
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
+                
+                # Clear old logs
+                st.session_state.shopify_logs = []
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
 
@@ -515,12 +528,17 @@ if st.session_state.header_data is not None:
         if "shopify" in st.secrets:
             if st.button("🛒 Check Shopify Inventory (Line Items)"):
                 with st.spinner("Checking Shopify..."):
-                    updated_lines = run_shopify_check(st.session_state.line_items)
+                    updated_lines, logs = run_shopify_check(st.session_state.line_items)
                     st.session_state.line_items = updated_lines
+                    st.session_state.shopify_logs = logs
                     st.success("Check Complete!")
                     st.rerun()
+        
+        # DISPLAY LOGS IF THEY EXIST
+        if st.session_state.shopify_logs:
+            with st.expander("🕵️ Shopify Debug Logs", expanded=True):
+                st.markdown("\n".join(st.session_state.shopify_logs))
                     
-        # CHANGED: We now show ALL columns, including the new Shopify_Status columns
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
         st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
     with t4:
