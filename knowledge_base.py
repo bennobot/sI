@@ -126,6 +126,11 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "Anspach & Hobday": """
+   check the product name carefully
+   the pack size is in the product name for cans
+   """,
+   
    "The Beak Brewery Limited": """
    the abv and style is at the end of the product name - this needs removing
    The item price is is the line price divided by the quantity
