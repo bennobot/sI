@@ -60,7 +60,9 @@ def fetch_shopify_products_by_vendor(vendor):
           node {
             id
             title
-            status
+            status  # We fetch status so we can see if it's ARCHIVED/DRAFT
+            format_meta: metafield(namespace: "custom", key: "Format") { value }
+            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
             variants(first: 20) {
               edges {
                 node {
@@ -77,6 +79,8 @@ def fetch_shopify_products_by_vendor(vendor):
     }
     """
     search_vendor = vendor.replace("'", "\\'") 
+    
+    # CHANGED: Removed "AND status:ACTIVE" to search ALL products
     variables = {"query": f"vendor:'{search_vendor}'"}
     
     try:
