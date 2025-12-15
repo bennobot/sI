@@ -6,7 +6,7 @@ import google.generativeai as genai
 import json
 import re
 import io
-import time
+import requests  # New library for Shopify API calls
 from streamlit_gsheets import GSheetsConnection
 from thefuzz import process
 from google.oauth2 import service_account
@@ -39,7 +39,53 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. DATA & DRIVE FUNCTIONS
+# 1. SHOPIFY FUNCTIONS (NEW)
+# ==========================================
+
+def test_shopify_connection():
+    """Checks if the Shopify secrets are valid."""
+    if "shopify" not in st.secrets:
+        return False, "Missing [shopify] section in secrets.toml"
+    
+    creds = st.secrets["shopify"]
+    shop_url = creds.get("shop_url")
+    token = creds.get("access_token")
+    version = creds.get("api_version", "2024-04")
+    
+    if not shop_url or not token:
+        return False, "Missing shop_url or access_token in secrets."
+
+    # Construct GraphQL Endpoint
+    endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
+    
+    # Simple Query: Get Shop Name
+    query = """
+    {
+      shop {
+        name
+        currencyCode
+      }
+    }
+    """
+    
+    try:
+        headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+        response = requests.post(endpoint, json={"query": query}, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if "errors" in data:
+                return False, f"GraphQL Error: {data['errors'][0]['message']}"
+            shop_name = data["data"]["shop"]["name"]
+            return True, f"Connected to: {shop_name} ({data['data']['shop']['currencyCode']})"
+        else:
+            return False, f"HTTP Error {response.status_code}: {response.text}"
+            
+    except Exception as e:
+        return False, f"Connection Exception: {str(e)}"
+
+# ==========================================
+# 2. DATA FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -120,44 +166,15 @@ def reconstruct_lines_from_matrix(matrix_df):
 
 def create_product_checker(df):
     if df is None or df.empty: return pd.DataFrame()
-    
     checker_rows = []
     for _, row in df.iterrows():
-        # 1. Build ERP String (Col 1)
         abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
-        parts = [
-            str(row['Supplier_Name']), 
-            str(row['Product_Name']), 
-            abv, 
-            str(row['Format'])
-        ]
-        # Filter out 'None', 'nan', or empty strings
-        col1 = " / ".join([p for p in parts if p and p.lower() not in ['none', 'nan', '']])
-        
-        # 2. Build Size String (Col 2)
-        # Handle Pack Size (Convert float to int string, handle NaN)
-        raw_pack = row['Pack_Size']
-        pack = ""
-        
-        if pd.notna(raw_pack) and raw_pack != "":
-            try:
-                # Convert "24.0" to "24"
-                val = float(raw_pack)
-                if val > 1: # We only show pack size if it's a multipack (greater than 1)
-                    pack = str(int(val))
-            except:
-                pack = str(raw_pack) # Keep as string if it's weird text
-
-        vol = str(row['Volume']) if pd.notna(row['Volume']) else ""
-        
-        # Logic: If pack exists -> "24x440ml". If not -> "30 Litre"
-        if pack:
-            col2 = f"{pack}x{vol}"
-        else:
-            col2 = vol
-            
+        parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
+        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
+        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
+        vol = str(row['Volume'])
+        col2 = f"{pack}x{vol}" if (pack and pack != '0' and pack != '1') else vol
         checker_rows.append({"ERP_String": col1, "Size_String": col2})
-        
     return pd.DataFrame(checker_rows).drop_duplicates()
 
 # --- GOOGLE DRIVE HELPERS ---
@@ -192,7 +209,7 @@ def download_file_from_drive(file_id):
     return file_stream
 
 # ==========================================
-# 2. SESSION & SIDEBAR
+# 3. SESSION & SIDEBAR
 # ==========================================
 
 # Initialize Session State
@@ -215,6 +232,15 @@ with st.sidebar:
 
     st.info("Logic loaded from `knowledge_base.py`")
     
+    st.divider()
+    # --- SHOPIFY TEST ---
+    if st.button("🛒 Test Shopify Connection"):
+        success, msg = test_shopify_connection()
+        if success:
+            st.success(msg)
+        else:
+            st.error(msg)
+            
     # --- DRIVE SCANNER ---
     st.divider()
     st.subheader("📂 Google Drive")
@@ -248,7 +274,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 3. MAIN LOGIC (SOURCE SELECTION)
+# 4. MAIN LOGIC (SOURCE SELECTION)
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -270,12 +296,10 @@ with tab_drive:
         file_names = [f['name'] for f in st.session_state.drive_files]
         selected_name = st.selectbox("Select Invoice from Drive List:", options=file_names, index=None, placeholder="Choose a file...")
         if selected_name:
-            # We don't download yet, just mark selection
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
             
-            # Logic: If user selects from drive, we use that UNLESS they also just dropped a file in manual
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -284,7 +308,6 @@ with tab_drive:
 # --- PROCESS BUTTON ---
 if st.button("🚀 Process Invoice", type="primary"):
     
-    # 1. Download from Drive if needed (and no manual upload override)
     if not uploaded_file and st.session_state.selected_drive_id:
         try:
             with st.status(f"Downloading {source_name}...", expanded=False) as status:
@@ -296,12 +319,9 @@ if st.button("🚀 Process Invoice", type="primary"):
 
     if target_stream and api_key:
         try:
-            # === DEBUGGING STATUS BOX ===
             with st.status("Processing Document...", expanded=True) as status:
                 
                 genai.configure(api_key=api_key)
-                # Fallback to stable model if 2.5 is acting up
-                # model = genai.GenerativeModel('gemini-1.5-flash') 
                 model = genai.GenerativeModel('models/gemini-2.5-flash')
                 
                 st.write("1. Converting PDF to Images (OCR Prep)...")
@@ -352,7 +372,6 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 st.write("5. Finalizing Data...")
                 
-                # --- POST PROCESSING ---
                 st.session_state.header_data = pd.DataFrame([data['header']])
                 df_lines = pd.DataFrame(data['line_items'])
                 
@@ -371,12 +390,11 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 4. DISPLAY
+# 5. DISPLAY
 # ==========================================
 
 if st.session_state.header_data is not None:
