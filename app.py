@@ -70,25 +70,28 @@ def get_cin7_product_id(sku):
     return None
 
 def get_cin7_supplier(name):
-    """
-    Finds a Supplier ID by Name.
-    Strategy: 
-    1. Exact Match via API.
-    2. If fail, fetch ALL suppliers and Fuzzy Match locally.
-    """
     headers = get_cin7_headers()
     if not headers: return None
     
-    # 1. Try Exact Match
-    url = f"{get_cin7_base_url()}/supplier?Name={name}"
+    # 1. URL Encode the name (Fixes '&' issue)
+    safe_name = quote(name)
+    url = f"{get_cin7_base_url()}/supplier?Name={safe_name}"
+    
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
             if "Suppliers" in data and len(data["Suppliers"]) > 0:
-                # Return the first one found
                 return data["Suppliers"][0]
     except: pass
+    
+    # 2. Fallback: Check without "&" if strict search failed
+    # Sometimes Cin7 stores it as "and"
+    if "&" in name:
+        alt_name = name.replace("&", "and")
+        return get_cin7_supplier(alt_name)
+        
+    return None
     
     # 2. Try Fuzzy Match (Fetch all suppliers - pagination loop required)
     # This is slower but guarantees a match if it exists under a slightly different name
