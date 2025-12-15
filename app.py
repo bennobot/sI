@@ -40,13 +40,11 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY RECONCILIATION ENGINE (NEW)
+# 1. SHOPIFY RECONCILIATION ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
-    """Queries Shopify GraphQL for all products by a specific Vendor."""
     if "shopify" not in st.secrets: return []
-    
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
@@ -55,7 +53,7 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # Query: Get Products + Variants + Metafields (Adjust namespace/key as needed)
+    # Updated Query: Fetch Metafields at PRODUCT level
     query = """
     query ($query: String!) {
       products(first: 50, query: $query) {
@@ -64,6 +62,10 @@ def fetch_shopify_products_by_vendor(vendor):
             id
             title
             status
+            # Product Level Metafields
+            format_meta: metafield(namespace: "custom", key: "Format") { value }
+            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
+            
             variants(first: 20) {
               edges {
                 node {
@@ -71,10 +73,6 @@ def fetch_shopify_products_by_vendor(vendor):
                   title
                   sku
                   inventoryQuantity
-                  # Attempt to fetch standard sizing metafields
-                  pack_size: metafield(namespace: "custom", key: "pack_size") { value }
-                  volume: metafield(namespace: "custom", key: "volume") { value }
-                  format: metafield(namespace: "custom", key: "format") { value }
                 }
               }
             }
@@ -83,8 +81,6 @@ def fetch_shopify_products_by_vendor(vendor):
       }
     }
     """
-    
-    # Cleaning vendor name for search syntax
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}' AND status:ACTIVE"}
     
@@ -94,140 +90,120 @@ def fetch_shopify_products_by_vendor(vendor):
             data = response.json()
             if "data" in data and "products" in data["data"]:
                 return data["data"]["products"]["edges"]
-    except:
-        pass
+    except: pass
     return []
 
-def parse_variant_attributes(variant_node):
-    """
-    Tries to determine Pack Size, Volume, and Format from a Shopify Variant.
-    Priority: Metafields -> Regex on Title -> Defaults
-    """
-    v = variant_node
-    title = v['title'].lower()
-    
-    # 1. Try Metafields
-    pack = v.get('pack_size', {}).get('value') if v.get('pack_size') else None
-    vol = v.get('volume', {}).get('value') if v.get('volume') else None
-    fmt = v.get('format', {}).get('value') if v.get('format') else None
-    
-    # 2. Fallback to Regex on Title (e.g. "24 x 440ml Can")
-    if not pack:
-        # Look for "24 x" or "12 pack"
-        pack_match = re.search(r'(\d+)\s*x', title)
-        if not pack_match: pack_match = re.search(r'(\d+)\s*pack', title)
-        if pack_match: pack = pack_match.group(1)
-        else: pack = "1" # Default to single unit
-        
-    if not vol:
-        # Look for "440ml", "44cl", "30l"
-        vol_match = re.search(r'(\d+)(ml|cl|l|g)', title)
-        if vol_match: vol = f"{vol_match.group(1)}{vol_match.group(2)}"
-        
-    if not fmt:
-        if "keg" in title: fmt = "Keg"
-        elif "cask" in title or "firkin" in title: fmt = "Cask"
-        elif "can" in title: fmt = "Can"
-        elif "bottle" in title: fmt = "Bottle"
-        
-    return str(pack), str(vol), str(fmt)
-
-def normalize_vol(v_str):
-    """Normalizes volumes for comparison (e.g. 440ml == 44cl)"""
+def normalize_vol_string(v_str):
+    """Convert '440ml' -> '44', '30L' -> '30' for comparison"""
     if not v_str: return "0"
-    v_str = v_str.lower().strip()
+    v_str = str(v_str).lower().strip()
     nums = re.findall(r'\d+', v_str)
     if not nums: return "0"
     val = float(nums[0])
     
+    # Normalize everything to "cl" or just raw numbers
+    # If input is ML, divide by 10 to get CL
     if "ml" in v_str: val = val / 10
-    elif "l" in v_str and "ml" not in v_str and "cl" not in v_str: val = val * 100
-    
-    return str(int(val)) # Return in cl (approx)
+    # If input is L, multiply by 100 to get CL (30L -> 3000cl? No, usually 30L is kept as 30)
+    # Let's just return the number for loose matching
+    return str(int(val))
 
 def run_shopify_check(matrix_df):
-    """Main Logic to compare Matrix Rows vs Shopify Data"""
     if matrix_df.empty: return matrix_df
     
-    # Create new columns
     matrix_df['Shopify_Status'] = "Pending"
-    matrix_df['Shopify_ID'] = ""
+    matrix_df['Shopify_Variant_ID'] = ""
     
-    # Get unique suppliers
     suppliers = matrix_df['Supplier_Name'].unique()
-    
-    # Cache Shopify Data in memory
     shopify_cache = {}
-    progress_bar = st.progress(0)
     
+    # 1. Bulk Fetch
+    progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        
     progress_bar.progress(1.0)
     
-    # Iterate Rows
+    # 2. Iterate Rows
     results = []
     for _, row in matrix_df.iterrows():
         status = "❓ Vendor Not Found"
-        shop_id = ""
+        found_id = ""
         
         supplier = row['Supplier_Name']
-        prod_name = row['Product_Name']
+        inv_prod_name = row['Product_Name']
         
-        # Check Formats (Matrix has Format1, Format2...)
-        # We process Format 1 for the main match check (Primary Format)
-        fmt = row.get('Format1', '')
-        pack = str(row.get('Pack_Size1', '1')).replace('.0', '')
-        if pack == "" or pack == "nan": pack = "1"
-        vol = row.get('Volume1', '')
+        # We only check Format 1 for now (Primary)
+        inv_fmt = str(row.get('Format1', '')).lower()
+        inv_pack = str(row.get('Pack_Size1', '1')).replace('.0', '')
+        if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         
+        # Normalize Invoice Volume (e.g. "44cl" -> "44")
+        inv_vol = normalize_vol_string(row.get('Volume1', ''))
+
         if supplier in shopify_cache and shopify_cache[supplier]:
-            potential_products = shopify_cache[supplier]
-            
+            candidates = shopify_cache[supplier]
             best_score = 0
             best_prod = None
             
-            # Fuzzy Match Name First
-            for p_edge in potential_products:
-                p = p_edge['node']
-                score = fuzz.token_sort_ratio(prod_name, p['title'])
-                
+            # A. Fuzzy Match Product Name
+            for edge in candidates:
+                prod = edge['node']
+                score = fuzz.token_sort_ratio(inv_prod_name, prod['title'])
                 if score > best_score:
                     best_score = score
-                    best_prod = p
+                    best_prod = prod
             
-            if best_prod:
-                # Now Check Variants for Size Match
-                size_match = False
-                for v_edge in best_prod['variants']['edges']:
-                    v = v_edge['node']
-                    s_pack, s_vol, s_fmt = parse_variant_attributes(v)
-                    
-                    # Normalize for comparison
-                    inv_vol_norm = normalize_vol(vol)
-                    shop_vol_norm = normalize_vol(s_vol)
-                    
-                    # Check Match (Simple Logic: Pack and Volume must roughly match)
-                    if s_pack == pack and inv_vol_norm == shop_vol_norm:
-                        size_match = True
-                        shop_id = v['id'] # Store Variant ID
-                        break
+            if best_prod and best_score > 75: # Threshold
+                # B. Check Product Metafield (Format)
+                shop_fmt = best_prod.get('format_meta', {})
+                shop_fmt_val = shop_fmt.get('value', '').lower() if shop_fmt else ""
                 
-                if best_score >= 90 and size_match:
-                    status = "✅ Exact Match"
-                elif best_score >= 80 and size_match:
-                    status = "⚠️ Fuzzy Match"
-                elif best_score >= 90 and not size_match:
-                    status = "❌ Size Mismatch"
+                # Loose format check (e.g. "Cask" in "Cask Ale")
+                fmt_match = (inv_fmt in shop_fmt_val) or (shop_fmt_val in inv_fmt)
+                
+                if fmt_match or not shop_fmt_val: # Allow if shopify format is blank
+                    
+                    # C. Check Variants for Size (Title Match)
+                    variant_found = False
+                    for v_edge in best_prod['variants']['edges']:
+                        variant = v_edge['node']
+                        v_title = variant['title'].lower()
+                        
+                        # Pack Size Check
+                        pack_ok = False
+                        if inv_pack == "1":
+                            # Single unit logic: Title doesn't say "24 x"
+                            if " x " not in v_title: pack_ok = True
+                        else:
+                            if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title:
+                                pack_ok = True
+                        
+                        # Volume Check
+                        # Look for "440" if inv_vol is "44" (cl vs ml issue)
+                        # Or look for "30" if inv_vol is "30"
+                        vol_ok = False
+                        if inv_vol in v_title: vol_ok = True
+                        # Handle CL vs ML mismatch (Invoice=44, Shopify=440)
+                        if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                        
+                        if pack_ok and vol_ok:
+                            variant_found = True
+                            found_id = variant['id']
+                            break
+                    
+                    if variant_found:
+                        status = "✅ Matched"
+                    else:
+                        status = "❌ Size Missing"
                 else:
-                    status = "🆕 New Product"
+                    status = "⚠️ Format Mismatch"
             else:
                 status = "🆕 New Product"
         
         row['Shopify_Status'] = status
-        row['Shopify_ID'] = shop_id
+        row['Shopify_Variant_ID'] = found_id
         results.append(row)
         
     return pd.DataFrame(results)
@@ -551,10 +527,10 @@ if st.session_state.header_data is not None:
     with t1:
         st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
         
-        # --- SHOPIFY CHECK BUTTON ---
+        # SHOPIFY BUTTON
         if "shopify" in st.secrets:
             if st.button("🛒 Check Shopify Inventory"):
-                with st.spinner("Checking Shopify..."):
+                with st.spinner("Comparing against Shopify..."):
                     updated_matrix = run_shopify_check(st.session_state.matrix_data)
                     st.session_state.matrix_data = updated_matrix
                     st.success("Shopify Check Complete!")
