@@ -70,16 +70,52 @@ def get_cin7_product_id(sku):
     return None
 
 def get_cin7_supplier(name):
+    """
+    Finds a Supplier ID by Name.
+    Strategy: 
+    1. Exact Match via API.
+    2. If fail, fetch ALL suppliers and Fuzzy Match locally.
+    """
     headers = get_cin7_headers()
     if not headers: return None
+    
+    # 1. Try Exact Match
     url = f"{get_cin7_base_url()}/supplier?Name={name}"
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
             if "Suppliers" in data and len(data["Suppliers"]) > 0:
+                # Return the first one found
                 return data["Suppliers"][0]
     except: pass
+    
+    # 2. Try Fuzzy Match (Fetch all suppliers - pagination loop required)
+    # This is slower but guarantees a match if it exists under a slightly different name
+    try:
+        # Fetching first 100 should cover active suppliers usually
+        all_suppliers = []
+        page = 1
+        while True:
+            r = requests.get(f"{get_cin7_base_url()}/supplier?Page={page}&Limit=100", headers=headers)
+            if r.status_code != 200: break
+            d = r.json()
+            if "Suppliers" not in d or not d["Suppliers"]: break
+            all_suppliers.extend(d["Suppliers"])
+            page += 1
+            if page > 5: break # Safety limit
+            
+        # Find best match using FuzzyWuzzy
+        names = [s['Name'] for s in all_suppliers]
+        match, score = process.extractOne(name, names)
+        
+        if score > 85: # High confidence threshold
+            # Find the object for that name
+            return next(s for s in all_suppliers if s['Name'] == match)
+            
+    except Exception as e:
+        print(f"Supplier Search Error: {e}")
+        
     return None
 
 def create_cin7_purchase_order(header_df, lines_df, location_choice):
