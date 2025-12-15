@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (MULTI-CANDIDATE CHECK)
+# 1. SHOPIFY ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -60,7 +60,7 @@ def fetch_shopify_products_by_vendor(vendor):
           node {
             id
             title
-            status  # We fetch status so we can see if it's ARCHIVED/DRAFT
+            status
             format_meta: metafield(namespace: "custom", key: "Format") { value }
             abv_meta: metafield(namespace: "custom", key: "ABV") { value }
             variants(first: 20) {
@@ -78,9 +78,10 @@ def fetch_shopify_products_by_vendor(vendor):
       }
     }
     """
+    # Escape quotes in vendor name
     search_vendor = vendor.replace("'", "\\'") 
     
-    # CHANGED: Removed "AND status:ACTIVE" to search ALL products
+    # REMOVED "AND status:ACTIVE" to search everything (Draft, Archived, Active)
     variables = {"query": f"vendor:'{search_vendor}'"}
     
     try:
@@ -102,10 +103,6 @@ def normalize_vol_string(v_str):
     return str(int(val))
 
 def run_shopify_check(lines_df):
-    """
-    Checks line items against Shopify.
-    Iterates through ALL name matches to find correct format.
-    """
     if lines_df.empty: return lines_df, ["No Lines to check."]
     
     logs = []
@@ -119,10 +116,10 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Fetching Shopify Data for:** `{supplier}`")
+        logs.append(f"🔎 **Searching Shopify Vendor:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"   -> Retrieved {len(products)} active products.")
+        logs.append(f"   -> Found {len(products)} products.")
         
     progress_bar.progress(1.0)
     
@@ -157,7 +154,7 @@ def run_shopify_check(lines_df):
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 
-                if score > 50: # Wide net
+                if score > 40: # Wide net
                     scored_candidates.append((score, prod))
             
             # Sort by score
@@ -335,7 +332,6 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
-# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -496,15 +492,13 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
-                
-                # Clear Logs
-                st.session_state.shopify_logs = []
+                st.session_state.shopify_logs = [] # Clear logs
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
+            st.warning("Try refreshing. If 2.5 hangs, consider falling back to 1.5.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
