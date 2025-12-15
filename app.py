@@ -102,7 +102,6 @@ def normalize_vol_string(v_str):
 def run_shopify_check(lines_df):
     if lines_df.empty: return lines_df.copy()
     
-    # Fix SettingWithCopyWarning
     df = lines_df.copy()
     df['Shopify_Status'] = "Pending"
     df['Shopify_Variant_ID'] = ""
@@ -463,10 +462,12 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
+                # Ensure base columns exist
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
+                # Create Derived Tables
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
                 
@@ -494,7 +495,6 @@ if st.session_state.header_data is not None:
     
     with t1:
         st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
-        
         edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000)
         colA, colB = st.columns([1, 4])
         with colA:
@@ -520,6 +520,7 @@ if st.session_state.header_data is not None:
                     st.success("Check Complete!")
                     st.rerun()
                     
+        # CHANGED: We now show ALL columns, including the new Shopify_Status columns
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
         st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
     with t4:
