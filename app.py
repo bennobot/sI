@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (WITH PAGINATION)
+# 1. SHOPIFY ENGINE (SKU SPLITTER)
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -53,14 +53,9 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # GraphQL Query with Pagination Variables
     query = """
-    query ($query: String!, $cursor: String) {
-      products(first: 50, query: $query, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
+    query ($query: String!) {
+      products(first: 50, query: $query) {
         edges {
           node {
             id
@@ -83,39 +78,17 @@ def fetch_shopify_products_by_vendor(vendor):
       }
     }
     """
-    
     search_vendor = vendor.replace("'", "\\'") 
-    # Search everything (Active, Draft, Archived)
-    search_query = f"vendor:'{search_vendor}'"
+    variables = {"query": f"vendor:'{search_vendor}'"} 
     
-    all_products = []
-    cursor = None
-    has_next = True
-    
-    while has_next:
-        variables = {"query": search_query, "cursor": cursor}
-        try:
-            response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                if "data" in data and "products" in data["data"]:
-                    
-                    # Add products to list
-                    products_data = data["data"]["products"]
-                    all_products.extend(products_data["edges"])
-                    
-                    # Pagination Logic
-                    page_info = products_data["pageInfo"]
-                    has_next = page_info["hasNextPage"]
-                    cursor = page_info["endCursor"]
-                else:
-                    has_next = False
-            else:
-                has_next = False
-        except:
-            has_next = False
-            
-    return all_products
+    try:
+        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and "products" in data["data"]:
+                return data["data"]["products"]["edges"]
+    except: pass
+    return []
 
 def normalize_vol_string(v_str):
     if not v_str: return "0"
@@ -131,8 +104,12 @@ def run_shopify_check(lines_df):
     
     logs = []
     df = lines_df.copy()
+    
+    # Initialize Columns
     df['Shopify_Status'] = "Pending"
-    df['Shopify_Variant_ID'] = ""
+    df['London'] = ""     # For L- SKUs
+    df['Gloucester'] = "" # For G- SKUs
+    df['Shopify_Variant_ID'] = "" # First matched ID (optional)
     
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
@@ -140,10 +117,10 @@ def run_shopify_check(lines_df):
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Searching Shopify (Active/Draft) for:** `{supplier}`")
+        logs.append(f"🔎 **Fetching Shopify Data for:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"   -> Found {len(products)} products.")
+        logs.append(f"   -> Retrieved {len(products)} products.")
         
     progress_bar.progress(1.0)
     
@@ -151,6 +128,8 @@ def run_shopify_check(lines_df):
     for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
         found_id = ""
+        london_sku = ""
+        glou_sku = ""
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
@@ -183,16 +162,21 @@ def run_shopify_check(lines_df):
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             
-            # --- FIX: Initialize match_found BEFORE the loop ---
+            # 2. Iterate ALL candidates to find L- and G- SKUs
+            # We do NOT break after the first match anymore, we check all high scorers
             match_found = False
             
             for score, prod in scored_candidates:
+                if score < 60: continue # Skip low confidence for SKU assignment
+                
                 logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
                 
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
+                    v_sku = str(variant.get('sku', '')).strip()
                     
+                    # Size Check
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
@@ -204,25 +188,32 @@ def run_shopify_check(lines_df):
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
                     if pack_ok and vol_ok:
-                        logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
-                        found_id = variant['id']
-                        status = "✅ Matched"
+                        logs.append(f"      ✅ **MATCH**: `{variant['title']}` | SKU: `{v_sku}`")
                         match_found = True
-                        break
+                        if not found_id: found_id = variant['id'] # Keep first ID
+                        
+                        # --- SKU SPLITTER ---
+                        if v_sku.startswith("L-"):
+                            london_sku = v_sku
+                        elif v_sku.startswith("G-"):
+                            glou_sku = v_sku
+                        
+                        # Note: We continue loop to find potential other location SKU
                     else:
-                        logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
-                
-                if match_found: break
+                        pass # Variant didn't match size
             
-            if not match_found:
-                if scored_candidates:
-                    status = "❌ Size Missing"
-                else:
-                    status = "🆕 New Product"
-                    logs.append(f"  - No match for `{inv_prod_name}`. Best was {scored_candidates[0][0] if scored_candidates else 0}%")
+            if match_found:
+                status = "✅ Matched"
+            elif scored_candidates:
+                status = "❌ Size Missing"
+            else:
+                status = "🆕 New Product"
+                logs.append(f"  - No match for `{inv_prod_name}`.")
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
+        row['London'] = london_sku
+        row['Gloucester'] = glou_sku
         results.append(row)
     
     return pd.DataFrame(results), logs
@@ -524,7 +515,6 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
