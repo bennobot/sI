@@ -139,51 +139,39 @@ def run_shopify_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             
-            # 1. Score ALL Candidates (Improved Matching)
+            # 1. Score ALL Candidates using PARTIAL RATIO
+            # "Goatfire" in "G-Holy Goat / Goatfire / ..." -> Score 100
             scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 
-                # CLEAN SHOPIFY TITLE
-                # Attempt to split by common separators
-                clean_title = shop_title_full
-                for sep in [" / ", " - ", "|"]:
-                    if sep in shop_title_full:
-                        parts = shop_title_full.split(sep)
-                        # Heuristic: The product name is usually the 2nd item if there are >2 parts
-                        # e.g. "G-Holy Goat / Goatfire / ..." -> "Goatfire"
-                        if len(parts) >= 2:
-                            clean_title = parts[1] 
-                        break
+                score = fuzz.partial_ratio(inv_prod_name.lower(), shop_title_full.lower())
                 
-                # USE TOKEN SET RATIO (Matches substrings perfectly)
-                # "Goatfire" vs "Goatfire Pale Ale" = 100
-                score = fuzz.token_set_ratio(inv_prod_name, clean_title)
-                
-                if score > 60: # Lower threshold, rely on variant check to filter
-                    scored_candidates.append((score, prod, clean_title))
+                if score > 80: # High threshold because partial match is very generous
+                    scored_candidates.append((score, prod))
             
             # Sort by score
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             
-            # 2. Iterate through candidates until match found
+            # 2. Iterate through candidates
             match_found = False
             
-            for score, prod, clean_name in scored_candidates:
-                logs.append(f"   Checking Candidate: `{prod['title']}` (Match Score: {score}%)")
+            for score, prod in scored_candidates:
+                logs.append(f"   Checking Candidate: `{prod['title']}` (Score: {score}%)")
                 
-                # Check Variants
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     
+                    # Pack Check
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
                     else:
                         if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
                     
+                    # Vol Check
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
@@ -195,8 +183,7 @@ def run_shopify_check(lines_df):
                         match_found = True
                         break
                     else:
-                        # Log failure reason for debug
-                        logs.append(f"      ❌ Variant `{variant['title']}` rejected (Pack:{pack_ok} Vol:{vol_ok})")
+                        logs.append(f"      ❌ Variant `{variant['title']}` failed size (Need {inv_pack}/{inv_vol})")
                 
                 if match_found: break
             
