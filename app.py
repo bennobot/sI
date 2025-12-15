@@ -43,62 +43,6 @@ st.title("Brewery Invoice Parser ⚡")
 # 1. SHOPIFY ENGINE (DEEP DEBUG MODE)
 # ==========================================
 
-def fetch_shopify_products_by_vendor(vendor):
-    if "shopify" not in st.secrets: return []
-    creds = st.secrets["shopify"]
-    shop_url = creds.get("shop_url")
-    token = creds.get("access_token")
-    version = creds.get("api_version", "2024-04")
-    
-    endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
-    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    
-    query = """
-    query ($query: String!) {
-      products(first: 50, query: $query) {
-        edges {
-          node {
-            id
-            title
-            status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            variants(first: 20) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  inventoryQuantity
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    search_vendor = vendor.replace("'", "\\'") 
-    variables = {"query": f"vendor:'{search_vendor}' AND status:ACTIVE"}
-    
-    try:
-        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            if "data" in data and "products" in data["data"]:
-                return data["data"]["products"]["edges"]
-    except: pass
-    return []
-
-def normalize_vol_string(v_str):
-    if not v_str: return "0"
-    v_str = str(v_str).lower().strip()
-    nums = re.findall(r'\d+', v_str)
-    if not nums: return "0"
-    val = float(nums[0])
-    if "ml" in v_str: val = val / 10
-    return str(int(val))
-
 def run_shopify_check(lines_df):
     if lines_df.empty: return lines_df, ["No Lines to check."]
     
@@ -135,10 +79,8 @@ def run_shopify_check(lines_df):
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
-            best_score = 0
-            best_prod = None
             
-            # 1. Score Candidates
+            # 1. Score ALL Candidates
             scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
@@ -153,26 +95,20 @@ def run_shopify_check(lines_df):
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 
-                if score > 40: # Only log relevant ones
-                    scored_candidates.append((score, prod['title'], prod))
+                if score > 50: # Lower threshold to catch all formats
+                    scored_candidates.append((score, prod))
             
             # Sort by score
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             
-            # Log top candidates
-            if scored_candidates:
-                best_score, best_title, best_prod = scored_candidates[0]
-                logs.append(f"   Top Match: `{best_title}` (Score: {best_score}%)")
-                for s, t, _ in scored_candidates[1:3]:
-                    logs.append(f"   - Candidate: `{t}` ({s}%)")
-            else:
-                logs.append("   - No similar product names found.")
-
-            # 2. Check Variants if score is good
-            if best_prod and best_score > 70:
-                variant_found = False
+            # 2. Iterate through candidates until match found
+            match_found = False
+            
+            for score, prod in scored_candidates:
+                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
                 
-                for v_edge in best_prod['variants']['edges']:
+                # Check Variants
+                for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     
@@ -187,20 +123,21 @@ def run_shopify_check(lines_df):
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
                     if pack_ok and vol_ok:
-                        logs.append(f"   ✅ **MATCHED VARIANT**: `{variant['title']}`")
-                        variant_found = True
+                        logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
                         found_id = variant['id']
+                        status = "✅ Matched"
+                        match_found = True
                         break
                     else:
-                        fail_reason = []
-                        if not pack_ok: fail_reason.append(f"Pack {inv_pack} not found")
-                        if not vol_ok: fail_reason.append(f"Vol {inv_vol} not found")
-                        logs.append(f"   ❌ Variant `{variant['title']}` rejected: {', '.join(fail_reason)}")
+                        logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
                 
-                if variant_found: status = "✅ Matched"
-                else: status = "❌ Size Missing"
-            else:
-                status = "🆕 New Product"
+                if match_found: break # Stop checking other products
+            
+            if not match_found:
+                if scored_candidates:
+                    status = "❌ Size Missing" # Found name, but no variant matched size
+                else:
+                    status = "🆕 New Product" # No name match found
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
