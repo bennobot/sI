@@ -40,10 +40,68 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (DEEP DEBUG MODE)
+# 1. SHOPIFY ENGINE (MULTI-CANDIDATE CHECK)
 # ==========================================
 
+def fetch_shopify_products_by_vendor(vendor):
+    if "shopify" not in st.secrets: return []
+    creds = st.secrets["shopify"]
+    shop_url = creds.get("shop_url")
+    token = creds.get("access_token")
+    version = creds.get("api_version", "2024-04")
+    
+    endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    
+    query = """
+    query ($query: String!) {
+      products(first: 50, query: $query) {
+        edges {
+          node {
+            id
+            title
+            status
+            variants(first: 20) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  inventoryQuantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    search_vendor = vendor.replace("'", "\\'") 
+    variables = {"query": f"vendor:'{search_vendor}' AND status:ACTIVE"}
+    
+    try:
+        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and "products" in data["data"]:
+                return data["data"]["products"]["edges"]
+    except: pass
+    return []
+
+def normalize_vol_string(v_str):
+    if not v_str: return "0"
+    v_str = str(v_str).lower().strip()
+    nums = re.findall(r'\d+', v_str)
+    if not nums: return "0"
+    val = float(nums[0])
+    if "ml" in v_str: val = val / 10
+    return str(int(val))
+
 def run_shopify_check(lines_df):
+    """
+    Checks line items against Shopify.
+    Iterates through ALL name matches to find correct format.
+    """
     if lines_df.empty: return lines_df, ["No Lines to check."]
     
     logs = []
@@ -95,7 +153,7 @@ def run_shopify_check(lines_df):
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 
-                if score > 50: # Lower threshold to catch all formats
+                if score > 50: # Wide net
                     scored_candidates.append((score, prod))
             
             # Sort by score
@@ -442,7 +500,7 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("Try refreshing. If 2.5 hangs, consider falling back to 1.5.")
+            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
@@ -489,7 +547,6 @@ if st.session_state.header_data is not None:
                     st.success("Check Complete!")
                     st.rerun()
         
-        # SHOW LOGS
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Shopify Debug Logs", expanded=True):
                 st.markdown("\n".join(st.session_state.shopify_logs))
