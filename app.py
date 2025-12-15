@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY ENGINE (DEBUGGING ENABLED)
+# 1. SHOPIFY RECONCILIATION ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -100,10 +100,13 @@ def normalize_vol_string(v_str):
     return str(int(val))
 
 def run_shopify_check(lines_df):
+    """
+    Checks line items against Shopify.
+    Handles 'L-Supplier / Product / ABV / Format' title structure.
+    """
     if lines_df.empty: return lines_df, ["No Lines to check."]
     
     logs = []
-    
     df = lines_df.copy()
     df['Shopify_Status'] = "Pending"
     df['Shopify_Variant_ID'] = ""
@@ -128,8 +131,6 @@ def run_shopify_check(lines_df):
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
-        
-        inv_fmt = str(row.get('Format', '')).lower()
         inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         inv_vol = normalize_vol_string(row.get('Volume', ''))
@@ -141,48 +142,57 @@ def run_shopify_check(lines_df):
             
             for edge in candidates:
                 prod = edge['node']
-                score = fuzz.token_sort_ratio(inv_prod_name, prod['title'])
+                shop_title_full = prod['title']
+                
+                # --- NEW LOGIC: PARSE SHOPIFY TITLE STRUCTURE ---
+                # Expected format: "L-Supplier / Product Name / ABV / Format"
+                shop_prod_name_clean = shop_title_full
+                
+                if "/" in shop_title_full:
+                    parts = [p.strip() for p in shop_title_full.split("/")]
+                    # Usually Product Name is index 1
+                    if len(parts) >= 2:
+                        shop_prod_name_clean = parts[1]
+                
+                # Fuzzy Match
+                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
+                
+                # Boost if exact substring
+                if inv_prod_name.lower() in shop_prod_name_clean.lower():
+                    score += 10
+                
                 if score > best_score:
                     best_score = score
                     best_prod = prod
             
-            if best_prod and best_score > 75:
+            if best_prod and best_score > 70:
                 logs.append(f"MATCH: `{inv_prod_name}` == `{best_prod['title']}` ({best_score}%)")
                 
-                shop_fmt = best_prod.get('format_meta', {})
-                shop_fmt_val = shop_fmt.get('value', '').lower() if shop_fmt else ""
-                
-                fmt_match = (inv_fmt in shop_fmt_val) or (shop_fmt_val in inv_fmt)
-                
-                if fmt_match or not shop_fmt_val: 
-                    variant_found = False
-                    for v_edge in best_prod['variants']['edges']:
-                        variant = v_edge['node']
-                        v_title = variant['title'].lower()
-                        
-                        pack_ok = False
-                        if inv_pack == "1":
-                            if " x " not in v_title: pack_ok = True
-                        else:
-                            if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title:
-                                pack_ok = True
-                        
-                        vol_ok = False
-                        if inv_vol in v_title: vol_ok = True
-                        if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
-                        
-                        if pack_ok and vol_ok:
-                            variant_found = True
-                            found_id = variant['id']
-                            break
-                        else:
-                            logs.append(f"  - Variant `{v_title}` failed. Needed Pack `{inv_pack}` & Vol `{inv_vol}`.")
+                # Check Variants
+                variant_found = False
+                for v_edge in best_prod['variants']['edges']:
+                    variant = v_edge['node']
+                    v_title = variant['title'].lower()
                     
-                    if variant_found: status = "✅ Matched"
-                    else: status = "❌ Size Missing"
-                else: 
-                    status = "⚠️ Format Mismatch"
-                    logs.append(f"  - Format mismatch: Inv=`{inv_fmt}` vs Shop=`{shop_fmt_val}`")
+                    pack_ok = False
+                    if inv_pack == "1":
+                        if " x " not in v_title: pack_ok = True
+                    else:
+                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                    
+                    vol_ok = False
+                    if inv_vol in v_title: vol_ok = True
+                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    
+                    if pack_ok and vol_ok:
+                        variant_found = True
+                        found_id = variant['id']
+                        break
+                    else:
+                        logs.append(f"  - Variant `{v_title}` failed size check (Need {inv_pack}x / {inv_vol})")
+                
+                if variant_found: status = "✅ Matched"
+                else: status = "❌ Size Missing"
             else:
                 status = "🆕 New Product"
                 logs.append(f"  - No match for `{inv_prod_name}`. Best was {best_score}%")
@@ -321,7 +331,6 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
-# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -345,6 +354,7 @@ with st.sidebar:
     st.divider()
     st.subheader("📂 Google Drive")
     folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
+    
     if st.button("🔍 Scan Folder"):
         if folder_id:
             try:
@@ -385,163 +395,4 @@ with tab_upload:
     uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
     if uploaded_file:
         target_stream = uploaded_file
-        source_name = uploaded_file.name
-
-with tab_drive:
-    if st.session_state.drive_files:
-        file_names = [f['name'] for f in st.session_state.drive_files]
-        selected_name = st.selectbox("Select Invoice from Drive List:", options=file_names, index=None, placeholder="Choose a file...")
-        if selected_name:
-            file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
-            st.session_state.selected_drive_id = file_data['id']
-            st.session_state.selected_drive_name = file_data['name']
-            if not uploaded_file:
-                source_name = selected_name
-    else:
-        st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
-
-# --- PROCESS BUTTON ---
-if st.button("🚀 Process Invoice", type="primary"):
-    
-    if not uploaded_file and st.session_state.selected_drive_id:
-        try:
-            with st.status(f"Downloading {source_name}...", expanded=False) as status:
-                target_stream = download_file_from_drive(st.session_state.selected_drive_id)
-                status.update(label="Download Complete", state="complete")
-        except Exception as e:
-            st.error(f"Download Failed: {e}")
-            st.stop()
-
-    if target_stream and api_key:
-        try:
-            with st.status("Processing Document...", expanded=True) as status:
-                
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('models/gemini-2.5-flash')
-                
-                st.write("1. Converting PDF to Images (OCR Prep)...")
-                target_stream.seek(0)
-                images = convert_from_bytes(target_stream.read(), dpi=300)
-                
-                st.write(f"2. Extracting Text from {len(images)} pages...")
-                full_text = ""
-                for i, img in enumerate(images):
-                    st.write(f"   - Scanning page {i+1}...")
-                    full_text += pytesseract.image_to_string(img) + "\n"
-
-                st.write("3. Sending Text to AI Model...")
-                injected = f"\n!!! USER OVERRIDE !!!\n{custom_rule}\n" if custom_rule else ""
-
-                prompt = f"""
-                Extract invoice data to JSON.
-                STRUCTURE:
-                {{
-                    "header": {{
-                        "Payable_To": "Supplier Name", "Invoice_Number": "...", "Issue_Date": "...", 
-                        "Payment_Terms": "...", "Due_Date": "...", "Total_Net": 0.00, 
-                        "Total_VAT": 0.00, "Total_Gross": 0.00, "Total_Discount_Amount": 0.00, "Shipping_Charge": 0.00
-                    }},
-                    "line_items": [
-                        {{
-                            "Supplier_Name": "...", "Collaborator": "...", "Product_Name": "...", "ABV": "...", 
-                            "Format": "...", "Pack_Size": "...", "Volume": "...", "Quantity": 1, "Item_Price": 10.00
-                        }}
-                    ]
-                }}
-                SUPPLIER RULEBOOK: {json.dumps(SUPPLIER_RULEBOOK)}
-                GLOBAL RULES: {GLOBAL_RULES_TEXT}
-                {injected}
-                INVOICE TEXT:
-                {full_text}
-                """
-
-                response = model.generate_content(prompt)
-                
-                st.write("4. Parsing Response...")
-                try:
-                    json_text = response.text.strip().replace("```json", "").replace("```", "")
-                    data = json.loads(json_text)
-                except Exception as e:
-                    st.error(f"AI returned invalid JSON: {response.text}")
-                    st.stop()
-                
-                st.write("5. Finalizing Data...")
-                
-                st.session_state.header_data = pd.DataFrame([data['header']])
-                df_lines = pd.DataFrame(data['line_items'])
-                
-                df_lines = clean_product_names(df_lines)
-                if st.session_state.master_suppliers:
-                    df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
-
-                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
-                existing = [c for c in cols if c in df_lines.columns]
-                st.session_state.line_items = df_lines[existing]
-                
-                st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
-                st.session_state.checker_data = create_product_checker(st.session_state.line_items)
-                
-                # Clear old logs
-                st.session_state.shopify_logs = []
-                
-                status.update(label="Processing Complete!", state="complete", expanded=False)
-
-        except Exception as e:
-            st.error(f"Critical Error: {e}")
-    else:
-        st.warning("Please upload a file or select one from Google Drive first.")
-
-# ==========================================
-# 5. DISPLAY
-# ==========================================
-
-if st.session_state.header_data is not None:
-    if custom_rule:
-        st.success("✅ Used Custom Rules")
-        try: sup = st.session_state.header_data.iloc[0]['Payable_To']
-        except: sup = "Unknown"
-        with st.expander("📩 Developer Snippet"):
-            st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
-
-    st.divider()
-    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📄 Header", "📝 Line Items", "🔍 Checker"])
-    
-    with t1:
-        st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
-        edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000)
-        colA, colB = st.columns([1, 4])
-        with colA:
-            if st.button("🔄 Sync & Regenerate"):
-                st.session_state.matrix_data = edited_matrix
-                st.session_state.line_items = reconstruct_lines_from_matrix(edited_matrix)
-                st.session_state.checker_data = create_product_checker(st.session_state.line_items)
-                st.success("Synced!")
-                st.rerun()
-        with colB:
-            st.download_button("📥 Download CSV", edited_matrix.to_csv(index=False), "matrix.csv")
-
-    with t2:
-        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
-        st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
-    with t3:
-        st.subheader("Line Items")
-        if "shopify" in st.secrets:
-            if st.button("🛒 Check Shopify Inventory (Line Items)"):
-                with st.spinner("Checking Shopify..."):
-                    updated_lines, logs = run_shopify_check(st.session_state.line_items)
-                    st.session_state.line_items = updated_lines
-                    st.session_state.shopify_logs = logs
-                    st.success("Check Complete!")
-                    st.rerun()
-        
-        # DISPLAY LOGS IF THEY EXIST
-        if st.session_state.shopify_logs:
-            with st.expander("🕵️ Shopify Debug Logs", expanded=True):
-                st.markdown("\n".join(st.session_state.shopify_logs))
-                    
-        edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
-        st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
-    with t4:
-        if st.session_state.checker_data is not None:
-            st.dataframe(st.session_state.checker_data, width=1000)
-            st.download_button("📥 Download CSV", st.session_state.checker_data.to_csv(index=False), "checker.csv")
+        source_name = uploaded_fi
