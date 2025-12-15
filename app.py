@@ -1,7 +1,4 @@
 def fetch_shopify_products_by_vendor(vendor):
-    """
-    Queries Shopify GraphQL, fetching ALL products for a vendor using pagination.
-    """
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
@@ -11,72 +8,60 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    all_products = []
-    cursor = None
-    
-    while True:
-        # Build the GraphQL Query (Including Pagination)
-        query = """
-        query ($query: String!, $cursor: String) {
-          products(first: 50, query: $query, after: $cursor) {
-            edges {
-              node {
-                id
-                title
-                status
-                format_meta: metafield(namespace: "custom", key: "Format") { value }
-                abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-                variants(first: 20) {
-                  edges {
-                    node {
-                      id
-                      title
-                      sku
-                      inventoryQuantity
-                    }
-                  }
+    # Query with Pagination support (cursor)
+    query = """
+    query ($query: String!, $cursor: String) {
+      products(first: 50, query: $query, after: $cursor) {
+        pageInfo {
+          hasNextPage
+        }
+        edges {
+          cursor
+          node {
+            id
+            title
+            status
+            variants(first: 20) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
                 }
               }
             }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
           }
         }
-        """
-        
-        # Build the query (including cursor, if present)
-        search_vendor = vendor.replace("'", "\\'")
-        variables = {"query": f"vendor:'{search_vendor}' AND (status:ACTIVE OR status:DRAFT)"}
-        if cursor:
-            variables["cursor"] = cursor
-        
-        try:
+      }
+    }
+    """
+    
+    search_vendor = vendor.replace("'", "\\'") 
+    search_query = f"vendor:'{search_vendor}' AND (status:ACTIVE OR status:DRAFT)"
+    
+    all_products = []
+    has_next_page = True
+    cursor = None
+    
+    try:
+        while has_next_page:
+            variables = {"query": search_query, "cursor": cursor}
             response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+            
             if response.status_code == 200:
                 data = response.json()
                 if "data" in data and "products" in data["data"]:
-                    products = data["data"]["products"]
-                    all_products.extend(products["edges"])
+                    products_data = data["data"]["products"]
+                    all_products.extend(products_data["edges"])
                     
-                    # Check for pagination
-                    if products["pageInfo"]["hasNextPage"]:
-                        cursor = products["pageInfo"]["endCursor"]
-                        time.sleep(0.25) # Be nice to the API
-                    else:
-                        break # No more pages
+                    has_next_page = products_data["pageInfo"]["hasNextPage"]
+                    if has_next_page:
+                        cursor = products_data["edges"][-1]["cursor"]
                 else:
-                    # Error handling
-                    if "errors" in data:
-                        st.error(f"GraphQL Error: {data['errors'][0]['message']}")
-                    break # Stop if no products returned
+                    break
             else:
-                st.error(f"HTTP Error {response.status_code}: {response.text}")
                 break
-                
-        except Exception as e:
-            st.error(f"Shopify Connection Error: {e}")
-            break # Stop if any error occurs
-    
+    except Exception as e:
+        st.sidebar.error(f"Shopify Pagination Error: {e}")
+        
     return all_products
