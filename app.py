@@ -126,8 +126,12 @@ def run_shopify_check(lines_df):
     
     logs = []
     df = lines_df.copy()
+    
+    # Initialize Columns
     df['Shopify_Status'] = "Pending"
-    df['Shopify_Variant_ID'] = ""
+    df['London_SKU'] = ""     
+    df['Gloucester_SKU'] = "" 
+    df['Shopify_Variant_ID'] = "" 
     
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
@@ -146,6 +150,8 @@ def run_shopify_check(lines_df):
     for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
         found_id = ""
+        london_sku = ""
+        glou_sku = ""
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
@@ -158,13 +164,12 @@ def run_shopify_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             
-            # 1. Score ALL Candidates
+            # 1. Score Candidates
             scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 
-                # Logic: Parse L-Supplier / Product Name
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
@@ -178,46 +183,58 @@ def run_shopify_check(lines_df):
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             
-            # 2. Iterate through candidates until match found
             match_found = False
             
-            if scored_candidates:
-                for score, prod in scored_candidates:
-                    logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
-                    
-                    for v_edge in prod['variants']['edges']:
-                        variant = v_edge['node']
-                        v_title = variant['title'].lower()
-                        
-                        pack_ok = False
-                        if inv_pack == "1":
-                            if " x " not in v_title: pack_ok = True
-                        else:
-                            if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
-                        
-                        vol_ok = False
-                        if inv_vol in v_title: vol_ok = True
-                        if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
-                        
-                        if pack_ok and vol_ok:
-                            logs.append(f"      ✅ **MATCHED VARIANT**: `{variant['title']}`")
-                            found_id = variant['id']
-                            status = "✅ Matched"
-                            match_found = True
-                            break
-                        else:
-                            logs.append(f"      ❌ Variant `{variant['title']}` failed size check")
-                    
-                    if match_found: break
+            for score, prod in scored_candidates:
+                logs.append(f"   Checking Candidate: `{prod['title']}` ({score}%)")
                 
-                if not match_found:
+                for v_edge in prod['variants']['edges']:
+                    variant = v_edge['node']
+                    v_title = variant['title'].lower()
+                    
+                    # Size Logic
+                    pack_ok = False
+                    if inv_pack == "1":
+                        if " x " not in v_title: pack_ok = True
+                    else:
+                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                    
+                    vol_ok = False
+                    if inv_vol in v_title: vol_ok = True
+                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    
+                    if pack_ok and vol_ok:
+                        raw_sku = str(variant.get('sku', '')).strip()
+                        logs.append(f"      ✅ **MATCH**: `{variant['title']}` | Raw SKU: `{raw_sku}`")
+                        
+                        found_id = variant['id']
+                        status = "✅ Matched"
+                        match_found = True
+                        
+                        # --- SKU CONSTRUCTION LOGIC ---
+                        if raw_sku and len(raw_sku) > 2:
+                            # Remove the first 2 chars (L- or G-) to get base
+                            # Assumes SKU format is always XX-CODE or L-CODE
+                            base_sku = raw_sku[2:]
+                            
+                            # Construct both versions
+                            london_sku = f"L-{base_sku}"
+                            glou_sku = f"G-{base_sku}"
+                        
+                        break # Stop checking variants for this product
+                
+                if match_found: break # Stop checking other products
+            
+            if not match_found:
+                if scored_candidates:
                     status = "❌ Size Missing"
-            else:
-                status = "🆕 New Product"
-                logs.append(f"  - No match for `{inv_prod_name}`.")
+                else:
+                    status = "🆕 New Product"
         
         row['Shopify_Status'] = status
         row['Shopify_Variant_ID'] = found_id
+        row['London_SKU'] = london_sku
+        row['Gloucester_SKU'] = glou_sku
         results.append(row)
     
     return pd.DataFrame(results), logs
