@@ -40,7 +40,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. SHOPIFY RECONCILIATION ENGINE
+# 1. SHOPIFY ENGINE (UPDATED FOR LINE ITEMS)
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -53,7 +53,6 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # Updated Query: Fetch Metafields at PRODUCT level
     query = """
     query ($query: String!) {
       products(first: 50, query: $query) {
@@ -62,10 +61,8 @@ def fetch_shopify_products_by_vendor(vendor):
             id
             title
             status
-            # Product Level Metafields
             format_meta: metafield(namespace: "custom", key: "Format") { value }
             abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            
             variants(first: 20) {
               edges {
                 node {
@@ -94,30 +91,27 @@ def fetch_shopify_products_by_vendor(vendor):
     return []
 
 def normalize_vol_string(v_str):
-    """Convert '440ml' -> '44', '30L' -> '30' for comparison"""
     if not v_str: return "0"
     v_str = str(v_str).lower().strip()
     nums = re.findall(r'\d+', v_str)
     if not nums: return "0"
     val = float(nums[0])
-    
-    # Normalize everything to "cl" or just raw numbers
-    # If input is ML, divide by 10 to get CL
     if "ml" in v_str: val = val / 10
-    # If input is L, multiply by 100 to get CL (30L -> 3000cl? No, usually 30L is kept as 30)
-    # Let's just return the number for loose matching
     return str(int(val))
 
-def run_shopify_check(matrix_df):
-    if matrix_df.empty: return matrix_df
+def run_shopify_check(lines_df):
+    """
+    Checks line items one by one against Shopify.
+    Much more accurate than Matrix checking.
+    """
+    if lines_df.empty: return lines_df
     
-    matrix_df['Shopify_Status'] = "Pending"
-    matrix_df['Shopify_Variant_ID'] = ""
+    lines_df['Shopify_Status'] = "Pending"
+    lines_df['Shopify_Variant_ID'] = ""
     
-    suppliers = matrix_df['Supplier_Name'].unique()
+    suppliers = lines_df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    # 1. Bulk Fetch
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
@@ -125,29 +119,26 @@ def run_shopify_check(matrix_df):
         shopify_cache[supplier] = products
     progress_bar.progress(1.0)
     
-    # 2. Iterate Rows
     results = []
-    for _, row in matrix_df.iterrows():
+    for _, row in lines_df.iterrows():
         status = "❓ Vendor Not Found"
         found_id = ""
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
         
-        # We only check Format 1 for now (Primary)
-        inv_fmt = str(row.get('Format1', '')).lower()
-        inv_pack = str(row.get('Pack_Size1', '1')).replace('.0', '')
+        inv_fmt = str(row.get('Format', '')).lower()
+        inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         
-        # Normalize Invoice Volume (e.g. "44cl" -> "44")
-        inv_vol = normalize_vol_string(row.get('Volume1', ''))
+        inv_vol = normalize_vol_string(row.get('Volume', ''))
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             best_score = 0
             best_prod = None
             
-            # A. Fuzzy Match Product Name
+            # 1. Fuzzy Match Product Name
             for edge in candidates:
                 prod = edge['node']
                 score = fuzz.token_sort_ratio(inv_prod_name, prod['title'])
@@ -155,17 +146,17 @@ def run_shopify_check(matrix_df):
                     best_score = score
                     best_prod = prod
             
-            if best_prod and best_score > 75: # Threshold
-                # B. Check Product Metafield (Format)
+            if best_prod and best_score > 75:
+                # 2. Check Product Metafield (Format)
                 shop_fmt = best_prod.get('format_meta', {})
                 shop_fmt_val = shop_fmt.get('value', '').lower() if shop_fmt else ""
                 
-                # Loose format check (e.g. "Cask" in "Cask Ale")
+                # Loose format check
                 fmt_match = (inv_fmt in shop_fmt_val) or (shop_fmt_val in inv_fmt)
                 
-                if fmt_match or not shop_fmt_val: # Allow if shopify format is blank
+                if fmt_match or not shop_fmt_val: 
                     
-                    # C. Check Variants for Size (Title Match)
+                    # 3. Check Variants for Size Match
                     variant_found = False
                     for v_edge in best_prod['variants']['edges']:
                         variant = v_edge['node']
@@ -174,18 +165,14 @@ def run_shopify_check(matrix_df):
                         # Pack Size Check
                         pack_ok = False
                         if inv_pack == "1":
-                            # Single unit logic: Title doesn't say "24 x"
                             if " x " not in v_title: pack_ok = True
                         else:
                             if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title:
                                 pack_ok = True
                         
                         # Volume Check
-                        # Look for "440" if inv_vol is "44" (cl vs ml issue)
-                        # Or look for "30" if inv_vol is "30"
                         vol_ok = False
                         if inv_vol in v_title: vol_ok = True
-                        # Handle CL vs ML mismatch (Invoice=44, Shopify=440)
                         if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                         
                         if pack_ok and vol_ok:
@@ -209,7 +196,7 @@ def run_shopify_check(matrix_df):
     return pd.DataFrame(results)
 
 # ==========================================
-# 2. EXISTING DATA FUNCTIONS
+# 2. DATA & DRIVE FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -336,7 +323,6 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
-# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -356,11 +342,9 @@ with st.sidebar:
 
     st.info("Logic loaded from `knowledge_base.py`")
     
-    # --- DRIVE SCANNER ---
     st.divider()
     st.subheader("📂 Google Drive")
     folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
-    
     if st.button("🔍 Scan Folder"):
         if folder_id:
             try:
@@ -375,8 +359,6 @@ with st.sidebar:
                 st.error(f"Error: {e}")
     
     st.divider()
-    
-    # --- THE LAB ---
     st.subheader("🧪 The Lab")
     with st.form("teaching_form"):
         st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
@@ -398,14 +380,12 @@ tab_upload, tab_drive = st.tabs(["⬆️ Manual Upload", "☁️ Google Drive"])
 target_stream = None
 source_name = "Unknown"
 
-# --- TAB 1: MANUAL ---
 with tab_upload:
     uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
     if uploaded_file:
         target_stream = uploaded_file
         source_name = uploaded_file.name
 
-# --- TAB 2: DRIVE ---
 with tab_drive:
     if st.session_state.drive_files:
         file_names = [f['name'] for f in st.session_state.drive_files]
@@ -414,9 +394,7 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            
-            if not uploaded_file:
-                source_name = selected_name
+            if not uploaded_file: source_name = selected_name
     else:
         st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
 
@@ -498,6 +476,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
+                # Create Derived Tables (Matrix generated from Lines)
                 st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
                 st.session_state.checker_data = create_product_checker(st.session_state.line_items)
                 
@@ -505,7 +484,7 @@ if st.button("🚀 Process Invoice", type="primary"):
 
         except Exception as e:
             st.error(f"Critical Error: {e}")
-            st.warning("If this is a timeout, the PDF might be too large or the API is busy. Try refreshing.")
+            st.warning("Try refreshing. If 2.5 hangs, consider falling back to 1.5.")
     else:
         st.warning("Please upload a file or select one from Google Drive first.")
 
@@ -522,19 +501,11 @@ if st.session_state.header_data is not None:
             st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
-    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📄 Header", "📝 Line Items", "🔍 Checker"])
+    # CHANGED: Matrix is Tab 1, Lines is Tab 2
+    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📝 Line Items", "📄 Header", "🔍 Checker"])
     
     with t1:
-        st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
-        
-        # SHOPIFY BUTTON
-        if "shopify" in st.secrets:
-            if st.button("🛒 Check Shopify Inventory"):
-                with st.spinner("Comparing against Shopify..."):
-                    updated_matrix = run_shopify_check(st.session_state.matrix_data)
-                    st.session_state.matrix_data = updated_matrix
-                    st.success("Shopify Check Complete!")
-        
+        st.info("💡 Edit product details here. Click 'Sync' to update other files.")
         edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", use_container_width=True)
         colA, colB = st.columns([1, 4])
         with colA:
@@ -548,12 +519,22 @@ if st.session_state.header_data is not None:
             st.download_button("📥 Download CSV", edited_matrix.to_csv(index=False), "matrix.csv")
 
     with t2:
+        # MOVED SHOPIFY CHECK HERE
+        st.subheader("Line Items")
+        if "shopify" in st.secrets:
+            if st.button("🛒 Check Shopify Inventory (Line Items)"):
+                with st.spinner("Checking Shopify..."):
+                    updated_lines = run_shopify_check(st.session_state.line_items)
+                    st.session_state.line_items = updated_lines
+                    st.success("Check Complete!")
+                    st.rerun()
+                    
+        edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", use_container_width=True)
+        st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
+
+    with t3:
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", use_container_width=True)
         st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
-    with t3:
-        st.caption("Generated from Matrix.")
-        st.dataframe(st.session_state.line_items, use_container_width=True)
-        st.download_button("📥 Download CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
     with t4:
         if st.session_state.checker_data is not None:
             st.dataframe(st.session_state.checker_data, use_container_width=True)
