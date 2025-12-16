@@ -8,6 +8,7 @@ import re
 import io
 import requests
 import time
+from urllib.parse import quote
 from streamlit_gsheets import GSheetsConnection
 from thefuzz import process, fuzz
 from google.oauth2 import service_account
@@ -43,36 +44,30 @@ st.title("Brewery Invoice Parser ⚡")
 # 1A. CIN7 CORE ENGINE
 # ==========================================
 
-def get_cin7_product_id(sku):
-    """
-    Queries Cin7 Core (DEAR) for a product by SKU.
-    Returns the Product ID (GUID) if found, else None.
-    """
+def get_cin7_headers():
     if "cin7" not in st.secrets: return None
-    
     creds = st.secrets["cin7"]
-    account_id = creds.get("account_id")
-    api_key = creds.get("api_key")
-    # Default URL for DEAR/Cin7 Core
-    base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
-    
-    url = f"{base_url}/product?Sku={sku}"
-    
-    headers = {
-        "api-auth-accountid": account_id,
-        "api-auth-applicationkey": api_key,
+    return {
+        "api-auth-accountid": creds.get("account_id"),
+        "api-auth-applicationkey": creds.get("api_key"),
         "Content-Type": "application/json"
     }
-    
+
+def get_cin7_base_url():
+    if "cin7" not in st.secrets: return None
+    return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
+
+def get_cin7_product_id(sku):
+    headers = get_cin7_headers()
+    if not headers: return None
+    url = f"{get_cin7_base_url()}/product?Sku={sku}"
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            # Cin7 Core returns a list under "Products" key
             if "Products" in data and len(data["Products"]) > 0:
                 return data["Products"][0]["ID"]
-    except:
-        pass
+    except: pass
     return None
 
 # ==========================================
@@ -85,44 +80,16 @@ def fetch_shopify_products_by_vendor(vendor):
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
-    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    
-    query = """
-    query ($query: String!) {
-      products(first: 50, query: $query) {
-        edges {
-          node {
-            id
-            title
-            status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            variants(first: 20) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  inventoryQuantity
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
+    query = """query ($query: String!) { products(first: 50, query: $query) { edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
-    
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "data" in data and "products" in data["data"]:
-                return data["data"]["products"]["edges"]
+            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
     except: pass
     return []
 
@@ -136,84 +103,61 @@ def normalize_vol_string(v_str):
     return str(int(val))
 
 def run_reconciliation_check(lines_df):
-    """
-    Runs both Shopify and Cin7 checks on the line items.
-    """
     if lines_df.empty: return lines_df, ["No Lines to check."]
-    
     logs = []
     df = lines_df.copy()
     
-    # Initialize Columns
     df['Shopify_Status'] = "Pending"
     df['London_SKU'] = ""     
-    df['Cin7_London_ID'] = "" # New Column
+    df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
-    df['Cin7_Glou_ID'] = ""   # New Column
-    
+    df['Cin7_Glou_ID'] = ""   
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    # 1. Shopify Batch Fetch
-    progress_bar = st.progress(0)
-    for i, supplier in enumerate(suppliers):
-        progress_bar.progress((i)/len(suppliers))
-        logs.append(f"🔎 **Fetching Shopify Data:** `{supplier}`")
+    for supplier in suppliers:
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"   -> Found {len(products)} products.")
-        
-    progress_bar.progress(1.0)
-    
+
     results = []
     for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
-        london_sku = ""
-        glou_sku = ""
-        cin7_l_id = ""
-        cin7_g_id = ""
-        
+        london_sku, glou_sku, cin7_l_id, cin7_g_id = "", "", "", ""
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
         inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"--- Checking: **{inv_prod_name}** ---")
+        logs.append(f"Checking: **{inv_prod_name}** ({inv_pack}x {inv_vol})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
-            
-            # Score Candidates
             scored_candidates = []
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
-                
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
-                
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
-                
-                if score > 40:
-                    scored_candidates.append((score, prod))
+                if score > 40: scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
-            
             match_found = False
             
+            # --- IMPROVED MATCHING LOOP ---
             for score, prod in scored_candidates:
                 if score < 60: continue
                 
+                # Check ALL variants in this product
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     v_sku = str(variant.get('sku', '')).strip()
                     
-                    # Size Check
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
@@ -225,31 +169,25 @@ def run_reconciliation_check(lines_df):
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
                     if pack_ok and vol_ok:
-                        logs.append(f"      ✅ **MATCH**: `{variant['title']}` | SKU: `{v_sku}`")
+                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
                         
-                        # --- SKU LOGIC ---
+                        # Populate SKUs (Don't overwrite if already found)
                         if v_sku and len(v_sku) > 2:
-                            base_sku = v_sku[2:] # Strip L- or G-
-                            london_sku = f"L-{base_sku}"
-                            glou_sku = f"G-{base_sku}"
-                        
-                        break
+                            base = v_sku[2:]
+                            if not london_sku: london_sku = f"L-{base}"
+                            if not glou_sku: glou_sku = f"G-{base}"
                 
-                if match_found: break
+                # Stop checking other products ONLY if we found a match AND generated the SKUs
+                if match_found and london_sku: 
+                    break 
             
-            if not match_found:
+            if not match_found: 
                 status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
         
-        # --- CIN7 CHECK (If we found SKUs) ---
-        if london_sku:
-            # logs.append(f"      Checking Cin7 for `{london_sku}`...")
-            cin7_l_id = get_cin7_product_id(london_sku)
-        
-        if glou_sku:
-            # logs.append(f"      Checking Cin7 for `{glou_sku}`...")
-            cin7_g_id = get_cin7_product_id(glou_sku)
+        if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
+        if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
 
         row['Shopify_Status'] = status
         row['London_SKU'] = london_sku
@@ -594,10 +532,9 @@ if st.session_state.header_data is not None:
         st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
     with t3:
         st.subheader("Line Items")
-        # CHANGED: "Check Inventory" now runs BOTH Shopify + Cin7
         if "shopify" in st.secrets:
-            if st.button("🛒 Check Inventory (Shopify + Cin7)"):
-                with st.spinner("Reconciling Inventory..."):
+            if st.button("🛒 Check Shopify Inventory (Line Items)"):
+                with st.spinner("Checking Shopify..."):
                     updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                     st.session_state.line_items = updated_lines
                     st.session_state.shopify_logs = logs
@@ -605,7 +542,7 @@ if st.session_state.header_data is not None:
                     st.rerun()
         
         if st.session_state.shopify_logs:
-            with st.expander("🕵️ Debug Logs", expanded=True):
+            with st.expander("🕵️ Shopify Debug Logs", expanded=True):
                 st.markdown("\n".join(st.session_state.shopify_logs))
                     
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
