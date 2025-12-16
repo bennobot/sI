@@ -70,29 +70,11 @@ def get_cin7_product_id(sku):
     except: pass
     return None
 
-def fetch_all_cin7_suppliers():
-    """Forces a fetch of all suppliers for debugging"""
-    headers = get_cin7_headers()
-    if not headers: return []
-    all_suppliers = []
-    page = 1
-    try:
-        while page <= 3: # Fetch 300
-            r = requests.get(f"{get_cin7_base_url()}/supplier?Page={page}&Limit=100", headers=headers)
-            if r.status_code == 200:
-                d = r.json()
-                if "Suppliers" in d:
-                    all_suppliers.extend([s['Name'] for s in d['Suppliers']])
-                    if len(d['Suppliers']) < 100: break
-            page += 1
-    except: pass
-    return sorted(all_suppliers)
-
 def get_cin7_supplier(name):
     headers = get_cin7_headers()
     if not headers: return None
     
-    # 1. Try Exact Match
+    # 1. Try Exact Match (URL Encoded)
     safe_name = quote(name)
     url = f"{get_cin7_base_url()}/supplier?Name={safe_name}"
     
@@ -104,18 +86,37 @@ def get_cin7_supplier(name):
                 return data["Suppliers"][0]
     except: pass
     
-    # 2. Fallback: "&" -> "and"
+    # 2. Fallback: Try swapping "&" for "and"
     if "&" in name:
-        return get_cin7_supplier(name.replace("&", "and"))
+        alt_name = name.replace("&", "and")
+        return get_cin7_supplier(alt_name)
     
-    # 3. DEBUG FETCH (If failed)
-    st.session_state.cin7_supplier_list = fetch_all_cin7_suppliers()
-    
-    # 4. Local Fuzzy Match
-    if st.session_state.cin7_supplier_list:
-        match, score = process.extractOne(name, st.session_state.cin7_supplier_list)
-        if score >= 90:
-            return get_cin7_supplier(match) # Recurse with correct name
+    # 3. DEBUG MODE: Fetch ALL suppliers if specific search failed
+    try:
+        # Only fetch if we haven't already populated the list to save API calls
+        if 'cin7_supplier_list' not in st.session_state or not st.session_state.cin7_supplier_list:
+            all_suppliers = []
+            page = 1
+            while page <= 5: # Fetch 500 to be safe
+                r = requests.get(f"{get_cin7_base_url()}/supplier?Page={page}&Limit=100", headers=headers)
+                if r.status_code == 200:
+                    d = r.json()
+                    if "Suppliers" in d:
+                        all_suppliers.extend([s['Name'] for s in d['Suppliers']])
+                        if len(d['Suppliers']) < 100: break
+                page += 1
+            st.session_state.cin7_supplier_list = sorted(all_suppliers)
+            
+        # Local Fuzzy Match Attempt
+        if st.session_state.cin7_supplier_list:
+            match, score = process.extractOne(name, st.session_state.cin7_supplier_list)
+            if score >= 95: # Very strict fallback
+                real_name = quote(match)
+                r = requests.get(f"{get_cin7_base_url()}/supplier?Name={real_name}", headers=headers)
+                return r.json()['Suppliers'][0]
+
+    except Exception as e:
+        print(f"Cin7 Debug Error: {e}")
 
     return None
 
@@ -124,12 +125,15 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if not headers: return False, "Cin7 Secrets missing."
 
     supplier_name = header_df.iloc[0]['Payable_To']
+    # Use Normalized Name if available
     if not lines_df.empty:
         supplier_name = lines_df.iloc[0]['Supplier_Name']
 
     supplier_data = get_cin7_supplier(supplier_name)
+    
     if not supplier_data:
-        return False, f"Supplier '{supplier_name}' not found. Check Sidebar Debugger."
+        # RETURN SPECIAL ERROR FLAG TO SHOW DEBUGGER
+        return False, f"Supplier '{supplier_name}' not found in Cin7."
 
     po_lines = []
     skipped_count = 0
@@ -177,44 +181,16 @@ def fetch_shopify_products_by_vendor(vendor):
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
-    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    
-    query = """
-    query ($query: String!) {
-      products(first: 50, query: $query) {
-        edges {
-          node {
-            id
-            title
-            status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            variants(first: 20) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  inventoryQuantity
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
+    query = """query ($query: String!) { products(first: 50, query: $query) { edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
-    
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "data" in data and "products" in data["data"]:
-                return data["data"]["products"]["edges"]
+            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
     except: pass
     return []
 
@@ -462,12 +438,6 @@ with st.sidebar:
     st.info("Logic loaded from `knowledge_base.py`")
     
     st.divider()
-    
-    # CIN7 DEBUGGER
-    if st.session_state.cin7_supplier_list:
-        with st.expander("🐞 Cin7 Suppliers (Found)", expanded=True):
-            st.write(st.session_state.cin7_supplier_list)
-            
     st.subheader("📂 Google Drive")
     folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
     
@@ -486,6 +456,11 @@ with st.sidebar:
     
     st.divider()
     
+    # CIN7 DEBUGGER SIDEBAR
+    if st.session_state.cin7_supplier_list:
+        with st.expander("🐞 Cin7 Suppliers (Found)", expanded=True):
+            st.write(st.session_state.cin7_supplier_list)
+            
     st.subheader("🧪 The Lab")
     with st.form("teaching_form"):
         st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
@@ -673,7 +648,12 @@ if st.session_state.header_data is not None:
                     with st.spinner("Creating..."):
                         ok, msg = create_cin7_purchase_order(st.session_state.header_data, st.session_state.line_items, loc)
                         if ok: st.success(msg)
-                        else: st.error(msg)
+                        else: 
+                            st.error(msg)
+                            # SHOW CIN7 DEBUGGER ONLY ON ERROR
+                            if st.session_state.cin7_supplier_list:
+                                with st.expander("🐞 Debugger: Found these Suppliers in Cin7", expanded=True):
+                                    st.write(st.session_state.cin7_supplier_list)
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=True):
