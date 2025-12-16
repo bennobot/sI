@@ -41,7 +41,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. CIN7 CORE ENGINE (FIXED URL ENCODING)
+# 1. CIN7 & SHOPIFY ENGINES
 # ==========================================
 
 def get_cin7_headers():
@@ -60,12 +60,9 @@ def get_cin7_base_url():
 def get_cin7_product_id(sku):
     headers = get_cin7_headers()
     if not headers: return None
-    
-    url = f"{get_cin7_base_url()}/product"
-    params = {"Sku": sku} # Let requests handle encoding
-    
+    url = f"{get_cin7_base_url()}/product?Sku={sku}"
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
             if "Products" in data and len(data["Products"]) > 0:
@@ -73,167 +70,22 @@ def get_cin7_product_id(sku):
     except: pass
     return None
 
-def get_cin7_supplier(name):
-    headers = get_cin7_headers()
-    if not headers: return None
-    
-    # Init Debug List
-    if 'cin7_supplier_list' not in st.session_state:
-        st.session_state.cin7_supplier_list = []
-
-    url = f"{get_cin7_base_url()}/supplier"
-    
-    # 1. Try Exact Match (Standard)
-    # Passing params dictionary ensures '&' is encoded exactly like Postman
-    try:
-        response = requests.get(url, headers=headers, params={"Name": name})
-        if response.status_code == 200:
-            data = response.json()
-            if "Suppliers" in data and len(data["Suppliers"]) > 0:
-                return data["Suppliers"][0]
-    except: pass
-    
-    # 2. Fallback: Try swapping "&" for "and"
-    if "&" in name:
-        return get_cin7_supplier(name.replace("&", "and"))
-    
-    # 3. DEBUG MODE: Fetch ALL suppliers if specific search failed
-    try:
-        if not st.session_state.cin7_supplier_list:
-            all_suppliers = []
-            page = 1
-            while page <= 5: # Fetch 500
-                r = requests.get(url, headers=headers, params={"Page": page, "Limit": 100})
-                if r.status_code == 200:
-                    d = r.json()
-                    if "Suppliers" in d:
-                        all_suppliers.extend([s['Name'] for s in d['Suppliers']])
-                        if len(d['Suppliers']) < 100: break
-                page += 1
-            st.session_state.cin7_supplier_list = sorted(all_suppliers)
-            
-        # 4. Local Fuzzy Match
-        if st.session_state.cin7_supplier_list:
-            match, score = process.extractOne(name, st.session_state.cin7_supplier_list)
-            if score >= 90:
-                # Recurse with the Clean Name found in the list
-                return get_cin7_supplier(match)
-
-    except Exception as e:
-        print(f"Cin7 Debug Error: {e}")
-
-    return None
-
-def create_cin7_purchase_order(header_df, lines_df, location_choice):
-    headers = get_cin7_headers()
-    if not headers: return False, "Cin7 Secrets missing.", []
-
-    logs = []
-    supplier_name = header_df.iloc[0]['Payable_To']
-    # Use Normalized Name if available
-    if not lines_df.empty:
-        supplier_name = lines_df.iloc[0]['Supplier_Name']
-
-    logs.append(f"Searching Cin7 for Supplier: '{supplier_name}'...")
-    supplier_data = get_cin7_supplier(supplier_name)
-    
-    if not supplier_data:
-        logs.append(f"❌ Supplier '{supplier_name}' NOT FOUND.")
-        if st.session_state.cin7_supplier_list:
-             logs.append(f"   (Local Debug List has {len(st.session_state.cin7_supplier_list)} entries loaded)")
-        return False, f"Supplier '{supplier_name}' not found.", logs
-
-    logs.append(f"✅ Found Supplier: {supplier_data.get('Name')} (ID: {supplier_data.get('ID')})")
-
-    po_lines = []
-    skipped_count = 0
-    id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
-    
-    for _, row in lines_df.iterrows():
-        prod_id = row.get(id_col)
-        if not prod_id or pd.isna(prod_id) or str(prod_id).strip() == "":
-            skipped_count += 1
-            continue
-        qty = float(row.get('Quantity', 0))
-        price = float(row.get('Item_Price', 0))
-        line = {"ProductID": prod_id, "Quantity": qty, "Price": price, "TaxRule": "20% VAT on Expenses"}
-        po_lines.append(line)
-
-    if not po_lines:
-        logs.append("❌ No valid product IDs found in table. Did you run the Inventory Check?")
-        return False, "No products to upload.", logs
-
-    payload = {
-        "SupplierID": supplier_data['ID'],
-        "Location": location_choice, 
-        "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
-        "TaxRule": "20% VAT on Expenses", 
-        "Lines": po_lines
-    }
-
-    url = f"{get_cin7_base_url()}/purchase"
-    try:
-        logs.append("Sending PO Payload to Cin7...")
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            res_json = response.json()
-            logs.append(f"✅ PO Created! ID: {res_json.get('ID')}")
-            return True, f"PO Created! ID: {res_json.get('ID')}", logs
-        else:
-            logs.append(f"❌ API Error {response.status_code}: {response.text}")
-            return False, f"API Error {response.status_code}", logs
-    except Exception as e:
-        logs.append(f"❌ Exception: {str(e)}")
-        return False, "Exception occurred", logs
-
-# ==========================================
-# 1B. SHOPIFY ENGINE
-# ==========================================
-
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
-    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    
-    query = """
-    query ($query: String!) {
-      products(first: 50, query: $query) {
-        edges {
-          node {
-            id
-            title
-            status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            variants(first: 20) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  inventoryQuantity
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
+    query = """query ($query: String!) { products(first: 50, query: $query) { edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
-    
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "data" in data and "products" in data["data"]:
-                return data["data"]["products"]["edges"]
+            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
     except: pass
     return []
 
@@ -251,17 +103,24 @@ def run_reconciliation_check(lines_df):
     logs = []
     df = lines_df.copy()
     
+    # Init Columns
     df['Shopify_Status'] = "Pending"
     df['London_SKU'] = ""     
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""   
+    
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    for supplier in suppliers:
+    progress_bar = st.progress(0)
+    for i, supplier in enumerate(suppliers):
+        progress_bar.progress((i)/len(suppliers))
+        logs.append(f"🔎 **Fetching Shopify Data:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
+        logs.append(f"   -> Found {len(products)} products.")
+    progress_bar.progress(1.0)
 
     results = []
     for _, row in df.iterrows():
@@ -278,6 +137,7 @@ def run_reconciliation_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
+            
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
@@ -298,14 +158,17 @@ def run_reconciliation_check(lines_df):
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     v_sku = str(variant.get('sku', '')).strip()
+                    
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
                     else:
                         if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                    
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
@@ -316,8 +179,11 @@ def run_reconciliation_check(lines_df):
                             glou_sku = f"G-{base_sku}"
                         break
                 if match_found: break
-            if not match_found: status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+            
+            if not match_found: 
+                status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
         
+        # --- CIN7 CHECK (This is what you wanted back) ---
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
 
@@ -468,8 +334,6 @@ if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
 if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
 if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
-if 'cin7_logs' not in st.session_state: st.session_state.cin7_logs = []
-if 'cin7_supplier_list' not in st.session_state: st.session_state.cin7_supplier_list = []
 
 with st.sidebar:
     st.header("Settings")
@@ -624,8 +488,6 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 # Clear Logs
                 st.session_state.shopify_logs = []
-                st.session_state.cin7_logs = []
-                st.session_state.cin7_supplier_list = []
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
 
@@ -666,49 +528,20 @@ if st.session_state.header_data is not None:
     with t2:
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
-
     with t3:
         st.subheader("Line Items")
-        # INVENTORY BUTTONS
-        col_act1, col_act2, _ = st.columns([1, 1, 2])
+        if "shopify" in st.secrets:
+            if st.button("🛒 Check Inventory (Shopify + Cin7)"):
+                with st.spinner("Checking Shopify & Cin7..."):
+                    updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
+                    st.session_state.line_items = updated_lines
+                    st.session_state.shopify_logs = logs
+                    st.success("Check Complete!")
+                    st.rerun()
         
-        with col_act1:
-            if "shopify" in st.secrets:
-                if st.button("🛒 Check Inventory"):
-                    with st.spinner("Reconciling..."):
-                        updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
-                        st.session_state.line_items = updated_lines
-                        st.session_state.shopify_logs = logs
-                        st.success("Complete!")
-                        st.rerun()
-                        
-        with col_act2:
-            if "cin7" in st.secrets:
-                loc = st.selectbox("PO Location:", ["London", "Gloucester"], key="po_loc")
-                if st.button("📤 Export PO"):
-                    with st.spinner("Creating..."):
-                        ok, msg, logs = create_cin7_purchase_order(st.session_state.header_data, st.session_state.line_items, loc)
-                        st.session_state.cin7_logs = logs
-                        if ok: st.success(msg)
-                        else: st.error(msg)
-                        st.rerun()
-        
-        # --- PERSISTENT DEBUGGERS ---
-        
-        # Shopify Logs
         if st.session_state.shopify_logs:
-            with st.expander("🕵️ Shopify Debug Logs", expanded=False):
+            with st.expander("🕵️ Debug Logs", expanded=True):
                 st.markdown("\n".join(st.session_state.shopify_logs))
-        
-        # Cin7 Logs (Show if populated)
-        if st.session_state.cin7_logs:
-            with st.expander("🐞 Cin7 Debug Logs", expanded=True):
-                 for log in st.session_state.cin7_logs:
-                     st.write(log)
-                     
-        if st.session_state.cin7_supplier_list:
-            with st.expander("🔎 Cin7 Supplier List (What we found)", expanded=True):
-                 st.write(st.session_state.cin7_supplier_list)
                     
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
         st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
