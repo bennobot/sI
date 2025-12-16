@@ -41,7 +41,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. CIN7 CORE ENGINE (PO UPLOAD)
+# 1A. CIN7 CORE ENGINE (PO UPLOAD + DEBUG)
 # ==========================================
 
 def get_cin7_headers():
@@ -74,7 +74,7 @@ def get_cin7_supplier(name):
     headers = get_cin7_headers()
     if not headers: return None
     
-    # Reset debug log
+    # Init Debug List
     if 'cin7_supplier_list' not in st.session_state:
         st.session_state.cin7_supplier_list = []
 
@@ -90,13 +90,12 @@ def get_cin7_supplier(name):
                 return data["Suppliers"][0]
     except: pass
     
-    # 2. Fallback: Fetch ALL suppliers to debug (and fuzzy match manually)
-    # This captures the actual list Cin7 has
+    # 2. DEBUG MODE: Fetch ALL suppliers to see what exists
     try:
         all_suppliers = []
         page = 1
-        # Fetch first 2 pages (200 suppliers) just for debugging context
-        while page <= 2:
+        # Fetch first 3 pages (300 suppliers) to be safe
+        while page <= 3:
             r = requests.get(f"{get_cin7_base_url()}/supplier?Page={page}&Limit=100", headers=headers)
             if r.status_code == 200:
                 d = r.json()
@@ -105,19 +104,19 @@ def get_cin7_supplier(name):
                     if len(d['Suppliers']) < 100: break
             page += 1
         
-        # Save to session state for the user to see
+        # Save to session so user can see it in sidebar
         st.session_state.cin7_supplier_list = sorted(all_suppliers)
         
-        # Manual Fuzzy check against downloaded list
+        # 3. Fuzzy Match Locally
         match, score = process.extractOne(name, all_suppliers)
-        if score >= 95: # Very strict fallback
-            # We found the name locally, so get the ID for it
+        if score >= 90:
+            # Re-fetch the ID using the correct name found
             real_name = quote(match)
             r = requests.get(f"{get_cin7_base_url()}/supplier?Name={real_name}", headers=headers)
             return r.json()['Suppliers'][0]
-            
+
     except Exception as e:
-        print(f"Cin7 List Error: {e}")
+        print(f"Cin7 Debug Error: {e}")
 
     return None
 
@@ -126,13 +125,13 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if not headers: return False, "Cin7 Secrets missing."
 
     supplier_name = header_df.iloc[0]['Payable_To']
-    # Use Normalized Name if available
+    # Use Normalized Name if available (Better chance of matching)
     if not lines_df.empty:
         supplier_name = lines_df.iloc[0]['Supplier_Name']
 
     supplier_data = get_cin7_supplier(supplier_name)
     if not supplier_data:
-        return False, f"Supplier '{supplier_name}' not found in Cin7."
+        return False, f"Supplier '{supplier_name}' not found in Cin7. Check Sidebar Debugger."
 
     po_lines = []
     skipped_count = 0
@@ -452,6 +451,7 @@ if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
 if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
 if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
+if 'cin7_supplier_list' not in st.session_state: st.session_state.cin7_supplier_list = []
 
 with st.sidebar:
     st.header("Settings")
@@ -482,6 +482,12 @@ with st.sidebar:
     
     st.divider()
     
+    # CIN7 DEBUGGER
+    if st.session_state.cin7_supplier_list:
+        with st.expander("🐞 Cin7 Supplier List (Debug)"):
+            st.write(f"Loaded {len(st.session_state.cin7_supplier_list)} suppliers from Cin7:")
+            st.write(st.session_state.cin7_supplier_list)
+    
     st.subheader("🧪 The Lab")
     with st.form("teaching_form"):
         st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
@@ -492,14 +498,6 @@ with st.sidebar:
     if st.button("Log Out"):
         st.session_state.password_correct = False
         st.rerun()
-
-    st.divider()
-    
-    # CIN7 DEBUGGER
-    if "cin7_supplier_list" in st.session_state and st.session_state.cin7_supplier_list:
-        with st.expander("🐞 Cin7 Supplier List (Debug)"):
-            st.write(f"Loaded {len(st.session_state.cin7_supplier_list)} suppliers from Cin7:")
-            st.write(st.session_state.cin7_supplier_list)
 
 # ==========================================
 # 4. MAIN LOGIC (SOURCE SELECTION)
