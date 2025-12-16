@@ -41,7 +41,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. CIN7 CORE ENGINE (PO UPLOAD)
+# 1A. CIN7 CORE ENGINE (FIXED URL ENCODING)
 # ==========================================
 
 def get_cin7_headers():
@@ -60,9 +60,12 @@ def get_cin7_base_url():
 def get_cin7_product_id(sku):
     headers = get_cin7_headers()
     if not headers: return None
-    url = f"{get_cin7_base_url()}/product?Sku={sku}"
+    
+    url = f"{get_cin7_base_url()}/product"
+    params = {"Sku": sku} # Let requests handle encoding
+    
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
             if "Products" in data and len(data["Products"]) > 0:
@@ -78,28 +81,29 @@ def get_cin7_supplier(name):
     if 'cin7_supplier_list' not in st.session_state:
         st.session_state.cin7_supplier_list = []
 
-    # 1. Exact Match
-    safe_name = quote(name)
-    url = f"{get_cin7_base_url()}/supplier?Name={safe_name}"
+    url = f"{get_cin7_base_url()}/supplier"
+    
+    # 1. Try Exact Match (Standard)
+    # Passing params dictionary ensures '&' is encoded exactly like Postman
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, params={"Name": name})
         if response.status_code == 200:
             data = response.json()
             if "Suppliers" in data and len(data["Suppliers"]) > 0:
                 return data["Suppliers"][0]
     except: pass
     
-    # 2. Fallback "&" -> "and"
+    # 2. Fallback: Try swapping "&" for "and"
     if "&" in name:
         return get_cin7_supplier(name.replace("&", "and"))
     
-    # 3. DEBUG FETCH (If list empty)
+    # 3. DEBUG MODE: Fetch ALL suppliers if specific search failed
     try:
         if not st.session_state.cin7_supplier_list:
             all_suppliers = []
             page = 1
             while page <= 5: # Fetch 500
-                r = requests.get(f"{get_cin7_base_url()}/supplier?Page={page}&Limit=100", headers=headers)
+                r = requests.get(url, headers=headers, params={"Page": page, "Limit": 100})
                 if r.status_code == 200:
                     d = r.json()
                     if "Suppliers" in d:
@@ -112,11 +116,11 @@ def get_cin7_supplier(name):
         if st.session_state.cin7_supplier_list:
             match, score = process.extractOne(name, st.session_state.cin7_supplier_list)
             if score >= 90:
-                real_name = quote(match)
-                r = requests.get(f"{get_cin7_base_url()}/supplier?Name={real_name}", headers=headers)
-                return r.json()['Suppliers'][0]
+                # Recurse with the Clean Name found in the list
+                return get_cin7_supplier(match)
+
     except Exception as e:
-        print(f"Cin7 List Error: {e}")
+        print(f"Cin7 Debug Error: {e}")
 
     return None
 
@@ -126,6 +130,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     logs = []
     supplier_name = header_df.iloc[0]['Payable_To']
+    # Use Normalized Name if available
     if not lines_df.empty:
         supplier_name = lines_df.iloc[0]['Supplier_Name']
 
@@ -690,21 +695,20 @@ if st.session_state.header_data is not None:
         
         # --- PERSISTENT DEBUGGERS ---
         
+        # Shopify Logs
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Shopify Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
-                
+        
+        # Cin7 Logs (Show if populated)
         if st.session_state.cin7_logs:
-            with st.expander("🐞 Cin7 PO Logs", expanded=True):
-                for log in st.session_state.cin7_logs:
-                    if "❌" in log: st.error(log)
-                    elif "✅" in log: st.success(log)
-                    else: st.write(log)
-                
-                # Show supplier list if available in state
-                if st.session_state.cin7_supplier_list:
-                    st.warning("Exact match failed. Here are the suppliers found in Cin7:")
-                    st.write(st.session_state.cin7_supplier_list)
+            with st.expander("🐞 Cin7 Debug Logs", expanded=True):
+                 for log in st.session_state.cin7_logs:
+                     st.write(log)
+                     
+        if st.session_state.cin7_supplier_list:
+            with st.expander("🔎 Cin7 Supplier List (What we found)", expanded=True):
+                 st.write(st.session_state.cin7_supplier_list)
                     
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
         st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
