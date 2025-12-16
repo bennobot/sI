@@ -74,6 +74,10 @@ def get_cin7_supplier(name):
     headers = get_cin7_headers()
     if not headers: return None
     
+    # Reset debug log
+    if 'cin7_supplier_list' not in st.session_state:
+        st.session_state.cin7_supplier_list = []
+
     # 1. Try Exact Match (URL Encoded)
     safe_name = quote(name)
     url = f"{get_cin7_base_url()}/supplier?Name={safe_name}"
@@ -86,10 +90,34 @@ def get_cin7_supplier(name):
                 return data["Suppliers"][0]
     except: pass
     
-    # 2. Fallback: Try swapping "&" for "and"
-    if "&" in name:
-        alt_name = name.replace("&", "and")
-        return get_cin7_supplier(alt_name)
+    # 2. Fallback: Fetch ALL suppliers to debug (and fuzzy match manually)
+    # This captures the actual list Cin7 has
+    try:
+        all_suppliers = []
+        page = 1
+        # Fetch first 2 pages (200 suppliers) just for debugging context
+        while page <= 2:
+            r = requests.get(f"{get_cin7_base_url()}/supplier?Page={page}&Limit=100", headers=headers)
+            if r.status_code == 200:
+                d = r.json()
+                if "Suppliers" in d:
+                    all_suppliers.extend([s['Name'] for s in d['Suppliers']])
+                    if len(d['Suppliers']) < 100: break
+            page += 1
+        
+        # Save to session state for the user to see
+        st.session_state.cin7_supplier_list = sorted(all_suppliers)
+        
+        # Manual Fuzzy check against downloaded list
+        match, score = process.extractOne(name, all_suppliers)
+        if score >= 95: # Very strict fallback
+            # We found the name locally, so get the ID for it
+            real_name = quote(match)
+            r = requests.get(f"{get_cin7_base_url()}/supplier?Name={real_name}", headers=headers)
+            return r.json()['Suppliers'][0]
+            
+    except Exception as e:
+        print(f"Cin7 List Error: {e}")
 
     return None
 
@@ -464,6 +492,14 @@ with st.sidebar:
     if st.button("Log Out"):
         st.session_state.password_correct = False
         st.rerun()
+
+    st.divider()
+    
+    # CIN7 DEBUGGER
+    if "cin7_supplier_list" in st.session_state and st.session_state.cin7_supplier_list:
+        with st.expander("🐞 Cin7 Supplier List (Debug)"):
+            st.write(f"Loaded {len(st.session_state.cin7_supplier_list)} suppliers from Cin7:")
+            st.write(st.session_state.cin7_supplier_list)
 
 # ==========================================
 # 4. MAIN LOGIC (SOURCE SELECTION)
