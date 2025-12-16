@@ -41,7 +41,7 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. CIN7 CORE ENGINE
+# 1A. CIN7 CORE ENGINE (PO UPLOAD)
 # ==========================================
 
 def get_cin7_headers():
@@ -74,14 +74,13 @@ def get_cin7_supplier(name):
     headers = get_cin7_headers()
     if not headers: return None
     
-    # Init Debug List if missing
+    # Init Debug List
     if 'cin7_supplier_list' not in st.session_state:
         st.session_state.cin7_supplier_list = []
 
-    # 1. Try Exact Match (URL Encoded)
+    # 1. Exact Match
     safe_name = quote(name)
     url = f"{get_cin7_base_url()}/supplier?Name={safe_name}"
-    
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
@@ -90,14 +89,12 @@ def get_cin7_supplier(name):
                 return data["Suppliers"][0]
     except: pass
     
-    # 2. Fallback: Try swapping "&" for "and"
+    # 2. Fallback "&" -> "and"
     if "&" in name:
-        alt_name = name.replace("&", "and")
-        return get_cin7_supplier(alt_name)
+        return get_cin7_supplier(name.replace("&", "and"))
     
-    # 3. DEBUG MODE: Fetch ALL suppliers
+    # 3. DEBUG FETCH (If list empty)
     try:
-        # Only fetch if list is empty to save API calls
         if not st.session_state.cin7_supplier_list:
             all_suppliers = []
             page = 1
@@ -111,30 +108,37 @@ def get_cin7_supplier(name):
                 page += 1
             st.session_state.cin7_supplier_list = sorted(all_suppliers)
             
-        # Local Fuzzy Match
+        # 4. Local Fuzzy Match
         if st.session_state.cin7_supplier_list:
             match, score = process.extractOne(name, st.session_state.cin7_supplier_list)
-            if score >= 95:
+            if score >= 90:
                 real_name = quote(match)
                 r = requests.get(f"{get_cin7_base_url()}/supplier?Name={real_name}", headers=headers)
                 return r.json()['Suppliers'][0]
-
     except Exception as e:
-        print(f"Cin7 Debug Error: {e}")
+        print(f"Cin7 List Error: {e}")
 
     return None
 
 def create_cin7_purchase_order(header_df, lines_df, location_choice):
     headers = get_cin7_headers()
-    if not headers: return False, "Cin7 Secrets missing."
+    if not headers: return False, "Cin7 Secrets missing.", []
 
+    logs = []
     supplier_name = header_df.iloc[0]['Payable_To']
     if not lines_df.empty:
         supplier_name = lines_df.iloc[0]['Supplier_Name']
 
+    logs.append(f"Searching Cin7 for Supplier: '{supplier_name}'...")
     supplier_data = get_cin7_supplier(supplier_name)
+    
     if not supplier_data:
-        return False, f"Supplier '{supplier_name}' not found."
+        logs.append(f"❌ Supplier '{supplier_name}' NOT FOUND.")
+        if st.session_state.cin7_supplier_list:
+             logs.append(f"   (Local Debug List has {len(st.session_state.cin7_supplier_list)} entries loaded)")
+        return False, f"Supplier '{supplier_name}' not found.", logs
+
+    logs.append(f"✅ Found Supplier: {supplier_data.get('Name')} (ID: {supplier_data.get('ID')})")
 
     po_lines = []
     skipped_count = 0
@@ -151,7 +155,8 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         po_lines.append(line)
 
     if not po_lines:
-        return False, "No matched products found to upload."
+        logs.append("❌ No valid product IDs found in table. Did you run the Inventory Check?")
+        return False, "No products to upload.", logs
 
     payload = {
         "SupplierID": supplier_data['ID'],
@@ -163,14 +168,18 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     url = f"{get_cin7_base_url()}/purchase"
     try:
+        logs.append("Sending PO Payload to Cin7...")
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             res_json = response.json()
-            return True, f"PO Created! ID: {res_json.get('ID')}. (Skipped {skipped_count} lines)"
+            logs.append(f"✅ PO Created! ID: {res_json.get('ID')}")
+            return True, f"PO Created! ID: {res_json.get('ID')}", logs
         else:
-            return False, f"API Error {response.status_code}: {response.text}"
+            logs.append(f"❌ API Error {response.status_code}: {response.text}")
+            return False, f"API Error {response.status_code}", logs
     except Exception as e:
-        return False, f"Exception: {str(e)}"
+        logs.append(f"❌ Exception: {str(e)}")
+        return False, "Exception occurred", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
@@ -182,16 +191,44 @@ def fetch_shopify_products_by_vendor(vendor):
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
+    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    query = """query ($query: String!) { products(first: 50, query: $query) { edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
+    
+    query = """
+    query ($query: String!) {
+      products(first: 50, query: $query) {
+        edges {
+          node {
+            id
+            title
+            status
+            format_meta: metafield(namespace: "custom", key: "Format") { value }
+            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
+            variants(first: 20) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  inventoryQuantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
+    
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
+            if "data" in data and "products" in data["data"]:
+                return data["data"]["products"]["edges"]
     except: pass
     return []
 
@@ -426,6 +463,7 @@ if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
 if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
 if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
+if 'cin7_logs' not in st.session_state: st.session_state.cin7_logs = []
 if 'cin7_supplier_list' not in st.session_state: st.session_state.cin7_supplier_list = []
 
 with st.sidebar:
@@ -581,6 +619,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 # Clear Logs
                 st.session_state.shopify_logs = []
+                st.session_state.cin7_logs = []
                 st.session_state.cin7_supplier_list = []
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
@@ -622,13 +661,7 @@ if st.session_state.header_data is not None:
     with t2:
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
-        
-        # CIN7 SUPPLIER DEBUGGER (HERE IN HEADER TAB)
-        if st.session_state.cin7_supplier_list:
-            with st.expander("🐞 Cin7 Supplier Debugger (Loaded List)", expanded=True):
-                st.write(f"Loaded {len(st.session_state.cin7_supplier_list)} suppliers from Cin7:")
-                st.write(st.session_state.cin7_supplier_list)
-        
+
     with t3:
         st.subheader("Line Items")
         # INVENTORY BUTTONS
@@ -649,13 +682,29 @@ if st.session_state.header_data is not None:
                 loc = st.selectbox("PO Location:", ["London", "Gloucester"], key="po_loc")
                 if st.button("📤 Export PO"):
                     with st.spinner("Creating..."):
-                        ok, msg = create_cin7_purchase_order(st.session_state.header_data, st.session_state.line_items, loc)
+                        ok, msg, logs = create_cin7_purchase_order(st.session_state.header_data, st.session_state.line_items, loc)
+                        st.session_state.cin7_logs = logs
                         if ok: st.success(msg)
                         else: st.error(msg)
+                        st.rerun()
+        
+        # --- PERSISTENT DEBUGGERS ---
         
         if st.session_state.shopify_logs:
-            with st.expander("🕵️ Debug Logs", expanded=True):
+            with st.expander("🕵️ Shopify Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
+                
+        if st.session_state.cin7_logs:
+            with st.expander("🐞 Cin7 PO Logs", expanded=True):
+                for log in st.session_state.cin7_logs:
+                    if "❌" in log: st.error(log)
+                    elif "✅" in log: st.success(log)
+                    else: st.write(log)
+                
+                # Show supplier list if available in state
+                if st.session_state.cin7_supplier_list:
+                    st.warning("Exact match failed. Here are the suppliers found in Cin7:")
+                    st.write(st.session_state.cin7_supplier_list)
                     
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
         st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
