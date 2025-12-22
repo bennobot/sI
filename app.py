@@ -518,33 +518,48 @@ if st.session_state.header_data is not None:
             st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
-    # TAB ORDER CHANGED
     t1, t2, t3 = st.tabs(["📝 Line Items (Work Area)", "📊 Missing Products Report", "📄 Invoice Header"])
     
     # --- TAB 1: LINE ITEMS (WORK AREA) ---
     with t1:
         st.subheader("1. Review & Edit Lines")
         
-        # INVENTORY BUTTON
-        if "shopify" in st.secrets:
-            if st.button("🛒 Check Inventory & Generate Report"):
-                with st.spinner("Checking..."):
-                    updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
-                    st.session_state.line_items = updated_lines
-                    st.session_state.shopify_logs = logs
-                    
-                    # GENERATE MATRIX ONLY FOR MISSING ITEMS
-                    st.session_state.matrix_data = create_product_matrix(updated_lines)
-                    
-                    st.success("Check Complete! See 'Missing Products Report' tab.")
-                    st.rerun()
+        # 1. EDIT FIRST (So button sees changes)
+        # We use a key to automatically update session_state when edited
+        edited_lines = st.data_editor(
+            st.session_state.line_items, 
+            num_rows="dynamic", 
+            width=1000,
+            key="line_editor"
+        )
+        
+        # Sync edits back to state immediately
+        # Note: st.data_editor with key auto-updates state, but we ensure it's synced for the button function
+        st.session_state.line_items = edited_lines
+
+        # 2. ACTIONS
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if "shopify" in st.secrets:
+                if st.button("🛒 Check Inventory & Generate Report"):
+                    with st.spinner("Checking..."):
+                        # Use the LATEST edited data
+                        updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
+                        st.session_state.line_items = updated_lines
+                        st.session_state.shopify_logs = logs
+                        
+                        # Generate Matrix
+                        st.session_state.matrix_data = create_product_matrix(updated_lines)
+                        
+                        st.success("Check Complete!")
+                        st.rerun()
+        
+        with col2:
+             st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
-                    
-        edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
-        st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
 
     # --- TAB 2: MISSING PRODUCTS REPORT ---
     with t2:
