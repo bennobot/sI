@@ -43,7 +43,6 @@ st.title("Brewery Invoice Parser ⚡")
 # ==========================================
 # 1A. CIN7 CORE ENGINE
 # ==========================================
-
 def get_cin7_headers():
     if "cin7" not in st.secrets: return None
     creds = st.secrets["cin7"]
@@ -73,23 +72,50 @@ def get_cin7_product_id(sku):
 # ==========================================
 # 1B. SHOPIFY ENGINE
 # ==========================================
-
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
+    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    query = """query ($query: String!) { products(first: 50, query: $query) { edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
+    
+    query = """
+    query ($query: String!) {
+      products(first: 50, query: $query) {
+        edges {
+          node {
+            id
+            title
+            status
+            format_meta: metafield(namespace: "custom", key: "Format") { value }
+            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
+            variants(first: 20) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  inventoryQuantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
+    
     try:
         response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
+            if "data" in data and "products" in data["data"]:
+                return data["data"]["products"]["edges"]
     except: pass
     return []
 
@@ -107,17 +133,24 @@ def run_reconciliation_check(lines_df):
     logs = []
     df = lines_df.copy()
     
-    df['Shopify_Status'] = "Pending"
+    # Init columns if missing
+    if 'Shopify_Status' not in df.columns: df['Shopify_Status'] = "Pending"
     df['London_SKU'] = ""     
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""   
+    
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    for supplier in suppliers:
+    progress_bar = st.progress(0)
+    for i, supplier in enumerate(suppliers):
+        progress_bar.progress((i)/len(suppliers))
+        logs.append(f"🔎 **Fetching Shopify Data:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
+        logs.append(f"   -> Found {len(products)} products.")
+    progress_bar.progress(1.0)
 
     results = []
     for _, row in df.iterrows():
@@ -129,11 +162,12 @@ def run_reconciliation_check(lines_df):
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"Checking: **{inv_prod_name}** ({inv_pack}x {inv_vol})")
+        logs.append(f"Checking: **{inv_prod_name}**")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
+            
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
@@ -141,6 +175,7 @@ def run_reconciliation_check(lines_df):
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
+                
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 if score > 40: scored_candidates.append((score, prod))
@@ -148,11 +183,8 @@ def run_reconciliation_check(lines_df):
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
-            # --- IMPROVED MATCHING LOOP ---
             for score, prod in scored_candidates:
                 if score < 60: continue
-                
-                # Check ALL variants in this product
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
@@ -172,16 +204,12 @@ def run_reconciliation_check(lines_df):
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
-                        
-                        # Populate SKUs (Don't overwrite if already found)
                         if v_sku and len(v_sku) > 2:
-                            base = v_sku[2:]
-                            if not london_sku: london_sku = f"L-{base}"
-                            if not glou_sku: glou_sku = f"G-{base}"
-                
-                # Stop checking other products ONLY if we found a match AND generated the SKUs
-                if match_found and london_sku: 
-                    break 
+                            base_sku = v_sku[2:]
+                            london_sku = f"L-{base_sku}"
+                            glou_sku = f"G-{base_sku}"
+                        break
+                if match_found: break
             
             if not match_found: 
                 status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
@@ -199,7 +227,7 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 2. DATA & DRIVE FUNCTIONS
+# 2. DATA FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -232,11 +260,22 @@ def clean_product_names(df):
     return df
 
 def create_product_matrix(df):
+    """
+    Creates Matrix view ONLY for items that are NOT matched in Shopify.
+    """
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
+    
+    # FILTER: Only keep items that are NOT matched
+    if 'Shopify_Status' in df.columns:
+        df = df[df['Shopify_Status'] != "✅ Matched"]
+    
+    if df.empty: return pd.DataFrame() # No missing products
+
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     grouped = df.groupby(group_cols, sort=False)
     matrix_rows = []
+    
     for name, group in grouped:
         row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
         for i, (_, item) in enumerate(group.iterrows()):
@@ -248,48 +287,17 @@ def create_product_matrix(df):
             row[f'Item_Price{suffix}'] = item['Item_Price']
             row[f'Quantity{suffix}'] = item['Quantity']
         matrix_rows.append(row)
+        
     matrix_df = pd.DataFrame(matrix_rows)
+    
+    # Reconstruct Columns
     base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     format_cols = []
     for i in range(1, 4):
         format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Quantity{i}'])
+    
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
-
-def reconstruct_lines_from_matrix(matrix_df):
-    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
-    new_lines = []
-    for _, row in matrix_df.iterrows():
-        base = {
-            'Supplier_Name': row.get('Supplier_Name', ''),
-            'Collaborator': row.get('Collaborator', ''),
-            'Product_Name': row.get('Product_Name', ''),
-            'ABV': row.get('ABV', '')
-        }
-        for i in range(1, 4):
-            fmt = row.get(f'Format{i}')
-            if pd.notna(fmt) and str(fmt).strip():
-                line = base.copy()
-                line['Format'] = fmt
-                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
-                line['Volume'] = row.get(f'Volume{i}', '')
-                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
-                line['Quantity'] = row.get(f'Quantity{i}', 0)
-                new_lines.append(line)
-    return pd.DataFrame(new_lines)
-
-def create_product_checker(df):
-    if df is None or df.empty: return pd.DataFrame()
-    checker_rows = []
-    for _, row in df.iterrows():
-        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
-        parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
-        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
-        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
-        vol = str(row['Volume'])
-        col2 = f"{pack}x{vol}" if (pack and pack != '0' and pack != '1') else vol
-        checker_rows.append({"ERP_String": col1, "Size_String": col2})
-    return pd.DataFrame(checker_rows).drop_duplicates()
 
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
@@ -330,7 +338,6 @@ def download_file_from_drive(file_id):
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
-if 'checker_data' not in st.session_state: st.session_state.checker_data = None
 if 'master_suppliers' not in st.session_state: st.session_state.master_suppliers = get_master_supplier_list()
 if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
@@ -401,7 +408,6 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -436,7 +442,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                     st.write(f"   - Scanning page {i+1}...")
                     full_text += pytesseract.image_to_string(img) + "\n"
 
-                st.write("3. Sending Text to AI Model...")
+                st.write("3. Sending Text to AI Model (2.5 Flash)...")
                 injected = f"\n!!! USER OVERRIDE !!!\n{custom_rule}\n" if custom_rule else ""
 
                 prompt = f"""
@@ -481,14 +487,15 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
+                # Initialize columns so Matrix generation doesn't fail on first run
+                df_lines['Shopify_Status'] = "Pending"
+
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
-                st.session_state.matrix_data = create_product_matrix(st.session_state.line_items)
-                st.session_state.checker_data = create_product_checker(st.session_state.line_items)
-                
-                # Clear Logs
+                # Clear old data
+                st.session_state.matrix_data = None
                 st.session_state.shopify_logs = []
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
@@ -511,43 +518,48 @@ if st.session_state.header_data is not None:
             st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
-    t1, t2, t3, t4 = st.tabs(["📊 **Product Matrix (Edit Here)**", "📄 Header", "📝 Line Items", "🔍 Checker"])
+    # TAB ORDER CHANGED
+    t1, t2, t3 = st.tabs(["📝 Line Items (Work Area)", "📊 Missing Products Report", "📄 Invoice Header"])
     
+    # --- TAB 1: LINE ITEMS (WORK AREA) ---
     with t1:
-        st.info("💡 Edit product details here. Click 'Sync' to update the other files.")
-        edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000)
-        colA, colB = st.columns([1, 4])
-        with colA:
-            if st.button("🔄 Sync & Regenerate"):
-                st.session_state.matrix_data = edited_matrix
-                st.session_state.line_items = reconstruct_lines_from_matrix(edited_matrix)
-                st.session_state.checker_data = create_product_checker(st.session_state.line_items)
-                st.success("Synced!")
-                st.rerun()
-        with colB:
-            st.download_button("📥 Download CSV", edited_matrix.to_csv(index=False), "matrix.csv")
-
-    with t2:
-        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
-        st.download_button("📥 Download CSV", edited_header.to_csv(index=False), "header.csv")
-    with t3:
-        st.subheader("Line Items")
+        st.subheader("1. Review & Edit Lines")
+        
+        # INVENTORY BUTTON
         if "shopify" in st.secrets:
-            if st.button("🛒 Check Shopify Inventory (Line Items)"):
-                with st.spinner("Checking Shopify..."):
+            if st.button("🛒 Check Inventory & Generate Report"):
+                with st.spinner("Checking..."):
                     updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                     st.session_state.line_items = updated_lines
                     st.session_state.shopify_logs = logs
-                    st.success("Check Complete!")
+                    
+                    # GENERATE MATRIX ONLY FOR MISSING ITEMS
+                    st.session_state.matrix_data = create_product_matrix(updated_lines)
+                    
+                    st.success("Check Complete! See 'Missing Products Report' tab.")
                     st.rerun()
         
         if st.session_state.shopify_logs:
-            with st.expander("🕵️ Shopify Debug Logs", expanded=True):
+            with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
                     
         edited_lines = st.data_editor(st.session_state.line_items, num_rows="dynamic", width=1000)
-        st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
-    with t4:
-        if st.session_state.checker_data is not None:
-            st.dataframe(st.session_state.checker_data, width=1000)
-            st.download_button("📥 Download CSV", st.session_state.checker_data.to_csv(index=False), "checker.csv")
+        st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
+
+    # --- TAB 2: MISSING PRODUCTS REPORT ---
+    with t2:
+        st.subheader("2. Products to Create in Shopify")
+        st.info("This table shows ONLY items that could not be matched to an existing Shopify product.")
+        
+        if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
+            edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000)
+            st.download_button("📥 Download Missing Products CSV", edited_matrix.to_csv(index=False), "missing_products.csv")
+        elif st.session_state.matrix_data is not None:
+            st.success("🎉 All products matched! Nothing to create.")
+        else:
+            st.warning("Run 'Check Inventory' in Tab 1 to generate this report.")
+
+    # --- TAB 3: HEADER ---
+    with t3:
+        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
+        st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
