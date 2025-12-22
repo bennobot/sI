@@ -262,6 +262,7 @@ def clean_product_names(df):
 def create_product_matrix(df):
     """
     Creates Matrix view ONLY for items that are NOT matched in Shopify.
+    Replaces Quantity with a 'Create?' checkbox.
     """
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
@@ -270,7 +271,7 @@ def create_product_matrix(df):
     if 'Shopify_Status' in df.columns:
         df = df[df['Shopify_Status'] != "✅ Matched"]
     
-    if df.empty: return pd.DataFrame() # No missing products
+    if df.empty: return pd.DataFrame()
 
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
     grouped = df.groupby(group_cols, sort=False)
@@ -285,10 +286,23 @@ def create_product_matrix(df):
             row[f'Pack_Size{suffix}'] = item['Pack_Size']
             row[f'Volume{suffix}'] = item['Volume']
             row[f'Item_Price{suffix}'] = item['Item_Price']
-            row[f'Quantity{suffix}'] = item['Quantity']
+            
+            # CHANGED: Instead of Quantity, add a Checkbox (Boolean)
+            row[f'Create{suffix}'] = False 
+            
         matrix_rows.append(row)
         
     matrix_df = pd.DataFrame(matrix_rows)
+    
+    # Reconstruct Columns
+    base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    format_cols = []
+    for i in range(1, 4):
+        # CHANGED: 'Create' instead of 'Quantity'
+        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
+    
+    final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
+    return matrix_df[final_cols]
     
     # Reconstruct Columns
     base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
