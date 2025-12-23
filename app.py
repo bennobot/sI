@@ -60,54 +60,44 @@ def get_cin7_base_url():
 
 @st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
-    """
-    Fetches ALL suppliers from Cin7 using urllib (Low-level).
-    Corrected Key: 'SupplierList'
-    """
-    if "cin7" not in st.secrets: return []
-    creds = st.secrets["cin7"]
+    """Fetches ALL suppliers from Cin7 for Dropdown"""
+    headers = get_cin7_headers()
+    if not headers: return []
     
-    headers = {
-        'Content-Type': 'application/json',
-        'api-auth-accountid': creds.get("account_id"),
-        'api-auth-applicationkey': creds.get("api_key")
-    }
-    
-    base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
     all_suppliers = []
     page = 1
+    base_url = get_cin7_base_url()
     
     try:
         while True:
+            # Manual URL construction
             url = f"{base_url}/supplier?Page={page}&Limit=100"
-            req = Request(url, headers=headers)
+            r = requests.get(url, headers=headers)
             
-            with urlopen(req) as response:
-                if response.getcode() == 200:
-                    data = json.loads(response.read())
+            if r.status_code == 200:
+                data = r.json()
+                # Handle SupplierList vs Suppliers key discrepancy
+                key = "SupplierList" if "SupplierList" in data else "Suppliers"
+                
+                if key in data and data[key]:
+                    for s in data[key]:
+                        all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
                     
-                    # FIX: Check for "SupplierList" instead of "Suppliers"
-                    # Also handle case variations just to be safe
-                    key = "SupplierList" if "SupplierList" in data else "Suppliers"
-                    
-                    if key in data and data[key]:
-                        for s in data[key]:
-                            all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
-                        
-                        if len(data[key]) < 100: break
-                        page += 1
-                    else:
-                        break
-                else:
-                    break
+                    if len(data[key]) < 100: break
+                    page += 1
+                else: break
+            else: break
+            
     except: pass
     
+    # Sort alphabetically
     return sorted(all_suppliers, key=lambda x: x['Name'].lower())
 
 def get_cin7_product_id(sku):
     headers = get_cin7_headers()
     if not headers: return None
     
+    # Use params dict for safe encoding
     url = f"{get_cin7_base_url()}/product"
     params = {"Sku": sku}
     
@@ -132,24 +122,7 @@ def fetch_shopify_products_by_vendor(vendor):
     version = creds.get("api_version", "2024-04")
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
-    
-    query = """
-    query ($query: String!, $cursor: String) {
-      products(first: 50, query: $query, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        edges {
-          node {
-            id title status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
-            variants(first: 20) {
-              edges { node { id title sku inventoryQuantity } }
-            }
-          }
-        }
-      }
-    }
-    """
+    query = """query ($query: String!, $cursor: String) { products(first: 50, query: $query, after: $cursor) { pageInfo { hasNextPage endCursor } edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
     
@@ -194,7 +167,6 @@ def run_reconciliation_check(lines_df):
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""   
-    
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
@@ -227,6 +199,7 @@ def run_reconciliation_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
+            
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
@@ -234,6 +207,7 @@ def run_reconciliation_check(lines_df):
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
+                
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
                 if score > 40: scored_candidates.append((score, prod))
@@ -320,7 +294,6 @@ def clean_product_names(df):
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
-    
     if 'Shopify_Status' in df.columns:
         df = df[df['Shopify_Status'] != "✅ Matched"]
     if df.empty: return pd.DataFrame()
@@ -348,6 +321,28 @@ def create_product_matrix(df):
         format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
+
+def reconstruct_lines_from_matrix(matrix_df):
+    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
+    new_lines = []
+    for _, row in matrix_df.iterrows():
+        base = {
+            'Supplier_Name': row.get('Supplier_Name', ''),
+            'Collaborator': row.get('Collaborator', ''),
+            'Product_Name': row.get('Product_Name', ''),
+            'ABV': row.get('ABV', '')
+        }
+        for i in range(1, 4):
+            fmt = row.get(f'Format{i}')
+            if pd.notna(fmt) and str(fmt).strip():
+                line = base.copy()
+                line['Format'] = fmt
+                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
+                line['Volume'] = row.get(f'Volume{i}', '')
+                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
+                line['Quantity'] = row.get(f'Quantity{i}', 0)
+                new_lines.append(line)
+    return pd.DataFrame(new_lines)
 
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
@@ -408,9 +403,9 @@ with st.sidebar:
     
     st.divider()
     
-    # --- CIN7 SUPPLIER AUDIT ---
+    # --- CIN7 AUDIT BUTTON ---
     if st.button("🔍 Fetch Cin7 Suppliers"):
-        st.cache_data.clear() # Clear cache for this function
+        st.cache_data.clear() # Clear cache
         with st.spinner("Downloading from Cin7..."):
             st.session_state.cin7_all_suppliers = fetch_all_cin7_suppliers_cached()
             if not st.session_state.cin7_all_suppliers:
@@ -418,16 +413,15 @@ with st.sidebar:
             else:
                 st.success(f"Loaded {len(st.session_state.cin7_all_suppliers)} suppliers.")
     
-    if st.session_state.cin7_all_suppliers: # Display only if not empty
-        with st.expander("📂 View Cin7 Supplier List"):
+    if st.session_state.cin7_all_suppliers:
+        with st.expander("📂 View Supplier List"):
             df_cin7_suppliers = pd.DataFrame(st.session_state.cin7_all_suppliers)
             st.dataframe(df_cin7_suppliers, use_container_width=True)
             st.download_button("📥 Download Cin7 Suppliers CSV", 
                                df_cin7_suppliers.to_csv(index=False), 
                                "cin7_suppliers_audit.csv")
-    
+
     st.divider()
-    
     st.subheader("📂 Google Drive")
     folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
     
@@ -440,7 +434,7 @@ with st.sidebar:
                 if files:
                     st.success(f"Found {len(files)} PDFs!")
                 else:
-                    st.warning("No PDFs found or Access Granted.")
+                    st.warning("No PDFs found or Access Denied.")
             except Exception as e:
                 st.error(f"Error: {e}")
     
@@ -481,6 +475,7 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
+            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -565,6 +560,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
+                # Initialize columns so Matrix generation doesn't fail on first run
                 df_lines['Shopify_Status'] = "Pending"
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
@@ -596,9 +592,11 @@ if st.session_state.header_data is not None:
     st.divider()
     t1, t2, t3 = st.tabs(["📝 Line Items (Work Area)", "📊 Missing Products Report", "📄 Invoice Header"])
     
+    # --- TAB 1: LINE ITEMS ---
     with t1:
         st.subheader("1. Review & Edit Lines")
         
+        # EDIT FIRST (Sync State)
         edited_lines = st.data_editor(
             st.session_state.line_items, 
             num_rows="dynamic", 
@@ -607,6 +605,7 @@ if st.session_state.header_data is not None:
         )
         st.session_state.line_items = edited_lines
 
+        # ACTIONS
         col1, col2 = st.columns([1, 4])
         with col1:
             if "shopify" in st.secrets:
@@ -616,6 +615,7 @@ if st.session_state.header_data is not None:
                         st.session_state.line_items = updated_lines
                         st.session_state.shopify_logs = logs
                         
+                        # Generate Matrix
                         st.session_state.matrix_data = create_product_matrix(updated_lines)
                         
                         st.success("Check Complete!")
@@ -628,6 +628,7 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
+    # --- TAB 2: MISSING PRODUCTS ---
     with t2:
         st.subheader("2. Products to Create in Shopify")
         st.info("Check the boxes as you create these products.")
@@ -649,6 +650,7 @@ if st.session_state.header_data is not None:
         else:
             st.warning("Run 'Check Inventory' in Tab 1 to generate this report.")
 
+    # --- TAB 3: HEADER ---
     with t3:
         st.subheader("Invoice Header")
         
@@ -657,41 +659,39 @@ if st.session_state.header_data is not None:
         if not st.session_state.header_data.empty:
              current_payee = st.session_state.header_data.iloc[0]['Payable_To']
         
-        # 2. Display Cin7 Supplier List (if loaded)
-        if st.session_state.cin7_all_suppliers:
-            cin7_list_names = [s['Name'] for s in st.session_state.cin7_all_suppliers]
-            
-            # 3. Calculate Default Index
-            default_index = 0
-            if cin7_list_names and current_payee:
-                match, score = process.extractOne(current_payee, cin7_list_names)
-                if score > 60:
-                    try: default_index = cin7_list_names.index(match)
-                    except ValueError: default_index = 0
+        # 2. Get Cin7 List (From Cache)
+        cin7_list = [s['Name'] for s in st.session_state.cin7_all_suppliers]
+        
+        # 3. Calculate Default Index
+        default_index = 0
+        if cin7_list and current_payee:
+            match, score = process.extractOne(current_payee, cin7_list)
+            if score > 60:
+                try: default_index = cin7_list.index(match)
+                except ValueError: default_index = 0
 
-            # 4. Show Dropdown
-            col_h1, col_h2 = st.columns([1, 2])
-            with col_h1:
-                selected_supplier = st.selectbox(
-                    "Matched Cin7 Supplier:", 
-                    options=cin7_list_names,
-                    index=default_index,
-                    key="header_supplier_select"
-                )
-                
-                # Update Header Data on selection
-                if selected_supplier and not st.session_state.header_data.empty:
-                    supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
-                    if supp_data:
-                        st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
-                        st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
+        # 4. Show Dropdown
+        col_h1, col_h2 = st.columns([1, 2])
+        with col_h1:
+            selected_supplier = st.selectbox(
+                "Matched Cin7 Supplier:", 
+                options=cin7_list,
+                index=default_index,
+                key="header_supplier_select",
+                help="Click 'Fetch Cin7 Suppliers' in sidebar first if this is empty."
+            )
             
-            with col_h2:
-                st.write("") # Spacer
-                if not st.session_state.header_data.empty:
-                    st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', 'N/A')}")
-        else:
-            st.warning("Cin7 Supplier List is empty. Check sidebar and Cin7 connection.")
+            # Update Header Data on selection
+            if selected_supplier and not st.session_state.header_data.empty:
+                supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
+                if supp_data:
+                    st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
+                    st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
+        
+        with col_h2:
+            st.write("") # Spacer
+            if not st.session_state.header_data.empty:
+                st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', 'N/A')}")
 
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
