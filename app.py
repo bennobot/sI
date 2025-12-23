@@ -596,14 +596,52 @@ if st.session_state.header_data is not None:
     with t1:
         st.subheader("1. Review & Edit Lines")
         
+        # PREPARE DATA FOR DISPLAY
+        # We rename and reorder columns just for this view
+        display_df = st.session_state.line_items.copy()
+        
+        # Rename Status
+        if 'Shopify_Status' in display_df.columns:
+            display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
+            
+        # Define Ideal Column Order
+        ideal_order = [
+            'Product_Status', 'Supplier_Name', 'Product_Name', 'ABV', 
+            'Format', 'Pack_Size', 'Volume', 'Quantity', 'Item_Price', 
+            'Collaborator', 'Shopify_Variant_ID', 'London_SKU', 'Gloucester_SKU'
+        ]
+        
+        # Filter to only columns that actually exist
+        final_cols = [c for c in ideal_order if c in display_df.columns]
+        # Add any remaining columns at the end
+        remaining_cols = [c for c in display_df.columns if c not in final_cols]
+        final_cols.extend(remaining_cols)
+        
+        display_df = display_df[final_cols]
+        
         # EDIT FIRST (Sync State)
         edited_lines = st.data_editor(
-            st.session_state.line_items, 
+            display_df, 
             num_rows="dynamic", 
             width=1000,
-            key="line_editor"
+            key="line_editor",
+            column_config={
+                "Product_Status": st.column_config.TextColumn(
+                    "Status",
+                    help="✅ Matched, ⚠️ Mismatch, or 🆕 New",
+                    disabled=True # Prevent manual editing of status logic
+                )
+            }
         )
-        st.session_state.line_items = edited_lines
+        
+        # SYNC BACK TO SESSION STATE (Handle Renaming Reverse)
+        # When user edits, we need to save it back to st.session_state.line_items
+        # But we must rename 'Product_Status' back to 'Shopify_Status' for the logic to work
+        if edited_lines is not None:
+            saved_df = edited_lines.copy()
+            if 'Product_Status' in saved_df.columns:
+                saved_df.rename(columns={'Product_Status': 'Shopify_Status'}, inplace=True)
+            st.session_state.line_items = saved_df
 
         # ACTIONS
         col1, col2 = st.columns([1, 4])
@@ -622,7 +660,7 @@ if st.session_state.header_data is not None:
                         st.rerun()
         
         with col2:
-             st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
+             st.download_button("📥 Download Lines CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=False):
