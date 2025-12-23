@@ -161,8 +161,13 @@ def run_reconciliation_check(lines_df):
         london_sku, glou_sku, cin7_l_id, cin7_g_id = "", "", "", ""
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
-        inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
-        if inv_pack in ["", "nan", "0"]: inv_pack = "1"
+        
+        raw_pack = str(row.get('Pack_Size', '')).strip()
+        if raw_pack.lower() in ['none', 'nan', '', '0']:
+            inv_pack = "1"
+        else:
+            inv_pack = raw_pack.replace('.0', '')
+            
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
         logs.append(f"Checking: **{inv_prod_name}**")
@@ -170,7 +175,6 @@ def run_reconciliation_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
-            
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
@@ -186,7 +190,7 @@ def run_reconciliation_check(lines_df):
             match_found = False
             
             for score, prod in scored_candidates:
-                if score < 60: continue
+                if score < 75: continue 
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
@@ -199,6 +203,11 @@ def run_reconciliation_check(lines_df):
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    if inv_vol == "9" and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
+                    if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
+                    
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
@@ -286,28 +295,6 @@ def create_product_matrix(df):
         format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
-
-def reconstruct_lines_from_matrix(matrix_df):
-    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
-    new_lines = []
-    for _, row in matrix_df.iterrows():
-        base = {
-            'Supplier_Name': row.get('Supplier_Name', ''),
-            'Collaborator': row.get('Collaborator', ''),
-            'Product_Name': row.get('Product_Name', ''),
-            'ABV': row.get('ABV', '')
-        }
-        for i in range(1, 4):
-            fmt = row.get(f'Format{i}')
-            if pd.notna(fmt) and str(fmt).strip():
-                line = base.copy()
-                line['Format'] = fmt
-                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
-                line['Volume'] = row.get(f'Volume{i}', '')
-                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
-                line['Quantity'] = row.get(f'Quantity{i}', 0)
-                new_lines.append(line)
-    return pd.DataFrame(new_lines)
 
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
@@ -495,10 +482,9 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 st.session_state.header_data = pd.DataFrame([data['header']])
                 
-                # --- INITIALIZE CIN7 COLUMNS IN HEADER ---
-                if 'Cin7_Supplier_ID' not in st.session_state.header_data.columns:
-                    st.session_state.header_data['Cin7_Supplier_ID'] = ""
-                    st.session_state.header_data['Cin7_Supplier_Name'] = ""
+                # Init Cin7 columns
+                st.session_state.header_data['Cin7_Supplier_ID'] = ""
+                st.session_state.header_data['Cin7_Supplier_Name'] = ""
                 
                 df_lines = pd.DataFrame(data['line_items'])
                 
@@ -512,9 +498,9 @@ if st.button("🚀 Process Invoice", type="primary"):
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
-                # Clear old data
-                st.session_state.matrix_data = None
+                # Clear Logs
                 st.session_state.shopify_logs = []
+                st.session_state.matrix_data = None
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
 
@@ -600,30 +586,36 @@ if st.session_state.header_data is not None:
     with t3:
         st.subheader("Invoice Header")
         
-        # Determine Default Supplier for Dropdown
-        current_payee = st.session_state.header_data.iloc[0]['Payable_To']
+        # 1. Get current payee
+        current_payee = "Unknown"
+        if not st.session_state.header_data.empty:
+             current_payee = st.session_state.header_data.iloc[0]['Payable_To']
         
-        # Filter Dropdown (Optional smart match logic)
+        # 2. Get Cin7 List
         cin7_list = [s['Name'] for s in st.session_state.cin7_all_suppliers]
-        default_idx = 0
         
-        if cin7_list:
+        # 3. Calculate Default Index
+        default_index = 0
+        if cin7_list and current_payee:
             match, score = process.extractOne(current_payee, cin7_list)
-            if score > 50:
-                try: default_idx = cin7_list.index(match)
-                except: pass
+            if score > 60:
+                try:
+                    default_index = cin7_list.index(match)
+                except ValueError:
+                    default_index = 0
 
-        # Show Dropdown
+        # 4. Show Dropdown
         col_h1, col_h2 = st.columns([1, 2])
         with col_h1:
             selected_supplier = st.selectbox(
                 "Matched Cin7 Supplier:", 
                 options=cin7_list,
-                index=default_index
+                index=default_index,
+                key="header_supplier_select"
             )
             
             # Update Header Data on selection
-            if selected_supplier:
+            if selected_supplier and not st.session_state.header_data.empty:
                 supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
                 if supp_data:
                     st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
@@ -631,7 +623,8 @@ if st.session_state.header_data is not None:
         
         with col_h2:
             st.write("") # Spacer
-            st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', '')}")
+            if not st.session_state.header_data.empty:
+                st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', '')}")
 
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
