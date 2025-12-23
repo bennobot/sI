@@ -209,7 +209,6 @@ def run_reconciliation_check(lines_df):
             for score, prod in scored_candidates:
                 # CHANGED: Only accept scores >= 85% for a match
                 if score < 85: continue 
-            
                     
                     # --- PACK SIZE MATCHING ---
                     pack_ok = False
