@@ -641,20 +641,15 @@ if st.session_state.header_data is not None:
     st.divider()
     
     # 1. CALCULATE STATUS
-    # Check if we have any unmatched items
     df = st.session_state.line_items
     if 'Shopify_Status' in df.columns:
         unmatched_count = len(df[df['Shopify_Status'] != "✅ Matched"])
     else:
-        unmatched_count = len(df) # Assume all unmatched if not checked yet
+        unmatched_count = len(df) 
 
     all_matched = (unmatched_count == 0) and ('Shopify_Status' in df.columns)
 
-    # 2. DEFINE TABS BASED ON STATE
-    # We always show Line Items.
-    # We show "To Upload" if there are issues.
-    # We show "Header/Export" ONLY if everything is perfect.
-    
+    # 2. TABS
     tabs = ["📝 Line Items (Work Area)"]
     if not all_matched:
         tabs.append("⚠️ Products To Upload")
@@ -667,13 +662,46 @@ if st.session_state.header_data is not None:
     with current_tabs[0]:
         st.subheader("1. Review & Reconciliation")
         
+        # PREPARE DISPLAY (Left-align Status)
+        display_df = st.session_state.line_items.copy()
+        if 'Shopify_Status' in display_df.columns:
+            display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
+
+        ideal_order = [
+            'Product_Status', 'Matched_Product', 'Matched_Variant', 'Image', 
+            'Supplier_Name', 'Product_Name', 'ABV', 'Format', 'Pack_Size', 
+            'Volume', 'Quantity', 'Item_Price', 'Collaborator', 
+            'Shopify_Variant_ID', 'London_SKU', 'Gloucester_SKU'
+        ]
+        
+        final_cols = [c for c in ideal_order if c in display_df.columns]
+        rem = [c for c in display_df.columns if c not in final_cols]
+        final_cols.extend(rem)
+        display_df = display_df[final_cols]
+        
+        # Configure columns
+        column_config = {
+            "Image": st.column_config.ImageColumn("Img"),
+            "Product_Status": st.column_config.TextColumn("Status", disabled=True),
+            "Matched_Product": st.column_config.TextColumn("Shopify Match", disabled=True),
+            "Matched_Variant": st.column_config.TextColumn("Variant Match", disabled=True),
+        }
+
+        # EDIT
         edited_lines = st.data_editor(
-            st.session_state.line_items, 
+            display_df, 
             num_rows="dynamic", 
             width=1000,
-            key="line_editor"
+            key="line_editor",
+            column_config=column_config
         )
-        st.session_state.line_items = edited_lines
+        
+        # SYNC BACK (Revert renaming)
+        if edited_lines is not None:
+            saved_df = edited_lines.copy()
+            if 'Product_Status' in saved_df.columns:
+                saved_df.rename(columns={'Product_Status': 'Shopify_Status'}, inplace=True)
+            st.session_state.line_items = saved_df
 
         col1, col2 = st.columns([1, 4])
         with col1:
@@ -683,24 +711,21 @@ if st.session_state.header_data is not None:
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
                         st.session_state.shopify_logs = logs
-                        
-                        # Generate Matrix
                         st.session_state.matrix_data = create_product_matrix(updated_lines)
-                        
                         st.rerun()
         
         with col2:
-             st.download_button("📥 Download CSV", edited_lines.to_csv(index=False), "lines.csv")
+             st.download_button("📥 Download CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: PRODUCTS TO UPLOAD (Conditional) ---
+    # --- TAB 2: PRODUCTS TO UPLOAD ---
     if not all_matched:
         with current_tabs[1]:
             st.subheader("2. Products to Create in Shopify")
-            st.warning(f"You have {unmatched_count} unmatched items. Please create them in Shopify or fix the names in Tab 1.")
+            st.warning(f"You have {unmatched_count} unmatched items.")
             
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
@@ -713,17 +738,15 @@ if st.session_state.header_data is not None:
                     width=1000,
                     column_config=column_config
                 )
-                st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "products_to_create.csv")
-            else:
-                st.info("Run 'Check Inventory' to populate this list.")
+                st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
 
-    # --- TAB 3: HEADER / EXPORT (Conditional) ---
+    # --- TAB 3: HEADER / EXPORT ---
     if all_matched:
-        with current_tabs[1]: # It's index 1 because the middle tab is hidden
+        with current_tabs[1]:
             st.subheader("3. Finalize & Export")
-            st.success("✅ All products matched! You can now proceed.")
+            st.success("✅ All products matched! Ready for export.")
             
-            # Header Editor
+            # 1. Supplier Link
             current_payee = "Unknown"
             if not st.session_state.header_data.empty:
                  current_payee = st.session_state.header_data.iloc[0]['Payable_To']
@@ -741,8 +764,7 @@ if st.session_state.header_data is not None:
                 selected_supplier = st.selectbox(
                     "Cin7 Supplier Link:", 
                     options=cin7_list_names,
-                    index=default_index,
-                    key="header_supplier_select"
+                    index=default_index
                 )
                 if selected_supplier and not st.session_state.header_data.empty:
                     supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
@@ -753,10 +775,13 @@ if st.session_state.header_data is not None:
             edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
             
             st.divider()
-            st.subheader("🚀 Export Purchase Order")
             
-            # --- PO EXPORT SECTION ---
-            # We don't have the PO logic active yet in this version (as requested), 
-            # but this is where the button would go.
+            # 2. Location Select
+            st.subheader("🚀 Export Purchase Order")
+            po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
+            
+            # 3. Export Logic (Placeholder for now)
+            if st.button(f"📤 Export PO to Cin7 ({po_location})"):
+                st.info("Export logic is temporarily disabled. Download CSV below.")
+            
             st.download_button("📥 Download Final PO CSV", edited_lines.to_csv(index=False), "final_po.csv")
-            st.info("Direct Cin7 Export is currently disabled until product matching is 100% stable.")
