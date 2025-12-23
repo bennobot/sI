@@ -83,8 +83,12 @@ def fetch_shopify_products_by_vendor(vendor):
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
     query = """
-    query ($query: String!) {
-      products(first: 50, query: $query) {
+    query ($query: String!, $cursor: String) {
+      products(first: 50, query: $query, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         edges {
           node {
             id
@@ -107,17 +111,39 @@ def fetch_shopify_products_by_vendor(vendor):
       }
     }
     """
-    search_vendor = vendor.replace("'", "\\'") 
-    variables = {"query": f"vendor:'{search_vendor}'"} 
     
-    try:
-        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            if "data" in data and "products" in data["data"]:
-                return data["data"]["products"]["edges"]
-    except: pass
-    return []
+    search_vendor = vendor.replace("'", "\\'") 
+    # Search everything (Active, Draft, Archived)
+    search_query = f"vendor:'{search_vendor}'"
+    
+    all_products = []
+    cursor = None
+    has_next = True
+    
+    while has_next:
+        variables = {"query": search_query, "cursor": cursor}
+        try:
+            response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                if "data" in data and "products" in data["data"]:
+                    
+                    # Add products to list
+                    products_data = data["data"]["products"]
+                    all_products.extend(products_data["edges"])
+                    
+                    # Pagination Logic
+                    page_info = products_data["pageInfo"]
+                    has_next = page_info["hasNextPage"]
+                    cursor = page_info["endCursor"]
+                else:
+                    has_next = False
+            else:
+                has_next = False
+        except:
+            has_next = False
+            
+    return all_products
 
 def normalize_vol_string(v_str):
     if not v_str: return "0"
