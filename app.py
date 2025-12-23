@@ -679,7 +679,7 @@ if st.sidebar.checkbox("🛠️ Developer Mode", value=False):
             
             # 2. Raw Request Test
             base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
-            url = f"{base_url}/supplier?Page=1&Limit=5" # Just get 5
+            url = f"{base_url}/product?Page=1&Limit=5" # Just get 5
             
             headers = {
                 "api-auth-accountid": creds.get("account_id"),
