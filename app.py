@@ -696,3 +696,213 @@ if st.session_state.header_data is not None:
 
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
+
+import streamlit as st
+import pandas as pd
+from pdf2image import convert_from_bytes
+import pytesseract
+import google.generativeai as genai
+import json
+import re
+import io
+import requests
+import time
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+from streamlit_gsheets import GSheetsConnection
+from thefuzz import process, fuzz
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+
+# Import the Brain
+from knowledge_base import GLOBAL_RULES_TEXT, SUPPLIER_RULEBOOK
+
+st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
+
+# ==========================================
+# 0. AUTHENTICATION
+# ==========================================
+def check_password():
+    if "APP_PASSWORD" not in st.secrets: return True
+    if "password_correct" not in st.session_state: st.session_state.password_correct = False
+    if st.session_state.password_correct: return True
+    st.title("🔒 Login Required")
+    pwd_input = st.text_input("Enter Password", type="password")
+    if st.button("Log In"):
+        if pwd_input == st.secrets["APP_PASSWORD"]:
+            st.session_state.password_correct = True
+            st.rerun()
+        else: st.error("Incorrect Password")
+    return False
+
+if not check_password(): st.stop()
+
+st.title("Brewery Invoice Parser ⚡")
+
+# ==========================================
+# 1A. CIN7 CORE ENGINE
+# ==========================================
+
+def get_cin7_headers():
+    if "cin7" not in st.secrets: return None
+    creds = st.secrets["cin7"]
+    return {
+        "api-auth-accountid": creds.get("account_id"),
+        "api-auth-applicationkey": creds.get("api_key"),
+        "Content-Type": "application/json"
+    }
+
+def get_cin7_base_url():
+    if "cin7" not in st.secrets: return None
+    return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
+
+@st.cache_data(ttl=3600) 
+def fetch_all_cin7_suppliers_cached():
+    """
+    Fetches ALL suppliers from Cin7 using urllib.
+    """
+    if "cin7" not in st.secrets: return []
+    creds = st.secrets["cin7"]
+    
+    headers = {
+        'Content-Type': 'application/json',
+        'api-auth-accountid': creds.get("account_id"),
+        'api-auth-applicationkey': creds.get("api_key")
+    }
+    
+    base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
+    all_suppliers = []
+    page = 1
+    
+    try:
+        while True:
+            url = f"{base_url}/supplier?Page={page}&Limit=100"
+            req = Request(url, headers=headers)
+            
+            with urlopen(req) as response:
+                if response.getcode() == 200:
+                    data = json.loads(response.read())
+                    if "Suppliers" in data and data["Suppliers"]:
+                        for s in data["Suppliers"]:
+                            all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
+                        if len(data["Suppliers"]) < 100: break
+                        page += 1
+                    else: break
+                else: break
+    except: pass
+    
+    return sorted(all_suppliers, key=lambda x: x['Name'].lower())
+
+def get_cin7_product_id(sku):
+    headers = get_cin7_headers()
+    if not headers: return None
+    
+    url = f"{get_cin7_base_url()}/product"
+    params = {"Sku": sku}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            if "Products" in data and len(data["Products"]) > 0:
+                return data["Products"][0]["ID"]
+    except: pass
+    return None
+
+# ==========================================
+# 1B. SHOPIFY ENGINE
+# ==========================================
+
+def fetch_shopify_products_by_vendor(vendor):
+    if "shopify" not in st.secrets: return []
+    creds = st.secrets["shopify"]
+    shop_url = creds.get("shop_url")
+    token = creds.get("access_token")
+    version = creds.get("api_version", "2024-04")
+    endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
+    query = """query ($query: String!) { products(first: 50, query: $query) { edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
+    search_vendor = vendor.replace("'", "\\'") 
+    variables = {"query": f"vendor:'{search_vendor}'"} 
+    try:
+        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
+    except: pass
+    return []
+
+def normalize_vol_string(v_str):
+    if not v_str: return "0"
+    v_str = str(v_str).lower().strip()
+    nums = re.findall(r'\d+', v_str)
+    if not nums: return "0"
+    val = float(nums[0])
+    if "ml" in v_str: val = val / 10
+    return str(int(val))
+
+def run_reconciliation_check(lines_df):
+    if lines_df.empty: return lines_df, ["No Lines to check."]
+    logs = []
+    df = lines_df.copy()
+    
+    df['Shopify_Status'] = "Pending"
+    df['London_SKU'] = ""     
+    df['Cin7_London_ID'] = "" 
+    df['Gloucester_SKU'] = "" 
+    df['Cin7_Glou_ID'] = ""   
+    suppliers = df['Supplier_Name'].unique()
+    shopify_cache = {}
+    
+    for supplier in suppliers:
+        products = fetch_shopify_products_by_vendor(supplier)
+        shopify_cache[supplier] = products
+
+    results = []
+    for _, row in df.iterrows():
+        status = "❓ Vendor Not Found"
+        london_sku, glou_sku, cin7_l_id, cin7_g_id = "", "", "", ""
+        supplier = row['Supplier_Name']
+        inv_prod_name = row['Product_Name']
+        inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
+        if inv_pack in ["", "nan", "0"]: inv_pack = "1"
+        inv_vol = normalize_vol_string(row.get('Volume', ''))
+        
+        logs.append(f"Checking: **{inv_prod_name}**")
+
+        if supplier in shopify_cache and shopify_cache[supplier]:
+            candidates = shopify_cache[supplier]
+            scored_candidates = []
+            for edge in candidates:
+                prod = edge['node']
+                shop_title_full = prod['title']
+                shop_prod_name_clean = shop_title_full
+                if "/" in shop_title_full:
+                    parts = [p.strip() for p in shop_title_full.split("/")]
+                    if len(parts) >= 2: shop_prod_name_clean = parts[1]
+                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
+                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
+                if score > 40: scored_candidates.append((score, prod))
+            
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            match_found = False
+            
+            for score, prod in scored_candidates:
+                if score < 60: continue
+                for v_edge in prod['variants']['edges']:
+                    variant = v_edge['node']
+                    v_title = variant['title'].lower()
+                    v_sku = str(variant.get('sku', '')).strip()
+                    pack_ok = False
+                    if inv_pack == "1":
+                        if " x " not in v_title: pack_ok = True
+                    else:
+                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                    vol_ok = False
+                    if inv_vol in v_title: vol_ok = True
+                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    if pack_ok and vol_ok:
+                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
+                        status = "✅ Matched"
+                        match_found = True
