@@ -659,3 +659,52 @@ if st.session_state.header_data is not None:
         if st.session_state.cin7_supplier_list:
             with st.expander("🐞 Cin7 Supplier Debugger", expanded=True):
                 st.write(st.session_state.cin7_supplier_list)
+
+# ==========================================
+# 6. DEVELOPER SANDBOX (HIDDEN)
+# ==========================================
+
+# Add a toggle in the sidebar (only visible if you know where to look)
+if st.sidebar.checkbox("🛠️ Developer Mode", value=False):
+    st.divider()
+    st.title("🧪 Cin7 Connection Sandbox")
+    
+    if st.button("Run Connection Test"):
+        
+        # 1. Credentials Check
+        if "cin7" not in st.secrets:
+            st.error("No Cin7 secrets found.")
+        else:
+            creds = st.secrets["cin7"]
+            
+            # 2. Raw Request Test
+            base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
+            url = f"{base_url}/supplier?Page=1&Limit=5" # Just get 5
+            
+            headers = {
+                "api-auth-accountid": creds.get("account_id"),
+                "api-auth-applicationkey": creds.get("api_key"),
+                "Content-Type": "application/json"
+            }
+            
+            st.write(f"Attempting GET to: `{url}`")
+            
+            try:
+                response = requests.get(url, headers=headers)
+                st.write(f"Status Code: `{response.status_code}`")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    st.success("Connection Successful!")
+                    st.write("First 5 Suppliers found:")
+                    st.json(data.get("Suppliers", []))
+                    
+                    # Test the Dropdown logic here
+                    names = [s['Name'] for s in data.get("Suppliers", [])]
+                    sel = st.selectbox("Test Dropdown:", names)
+                    st.write(f"You selected: {sel}")
+                else:
+                    st.error(f"API Error: {response.text}")
+                    
+            except Exception as e:
+                st.error(f"Python Exception: {str(e)}")
