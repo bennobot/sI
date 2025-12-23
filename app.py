@@ -675,47 +675,49 @@ if st.session_state.header_data is not None:
 
     # --- TAB 3: HEADER ---
     with t3:
-        st.subheader("Invoice Header")
+        st.subheader("Invoice Header & Supplier Link")
         
-        # 1. Get current payee
-        current_payee = "Unknown"
+        # 1. Get current payee from Invoice Extraction
+        invoice_payee = "Unknown"
         if not st.session_state.header_data.empty:
-             current_payee = st.session_state.header_data.iloc[0]['Payable_To']
+             invoice_payee = st.session_state.header_data.iloc[0]['Payable_To']
         
+        st.info(f"**Invoice Says:** {invoice_payee}")
+
         # 2. Get Cin7 List
         cin7_list = [s['Name'] for s in st.session_state.cin7_all_suppliers]
         
-        # 3. Calculate Default Index
+        # 3. Calculate Best Guess for Dropdown
         default_index = 0
-        if cin7_list and current_payee:
-            match, score = process.extractOne(current_payee, cin7_list)
+        if cin7_list and invoice_payee:
+            match, score = process.extractOne(invoice_payee, cin7_list)
             if score > 60:
-                try:
-                    default_index = cin7_list.index(match)
-                except ValueError:
-                    default_index = 0
+                try: default_index = cin7_list.index(match)
+                except ValueError: default_index = 0
 
-        # 4. Show Dropdown
-        col_h1, col_h2 = st.columns([1, 2])
+        # 4. Selection UI
+        col_h1, col_h2 = st.columns([2, 1])
         with col_h1:
             selected_supplier = st.selectbox(
-                "Matched Cin7 Supplier:", 
+                "Link to Cin7 Supplier:", 
                 options=cin7_list,
                 index=default_index,
                 key="header_supplier_select"
             )
-            
-            # Update Header Data on selection
-            if selected_supplier and not st.session_state.header_data.empty:
-                supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
-                if supp_data:
-                    st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
-                    st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
         
         with col_h2:
-            st.write("") # Spacer
-            if not st.session_state.header_data.empty:
-                st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', '')}")
+            st.write("") # Alignment spacer
+            st.write("") 
+            if st.button("🔗 Confirm Link"):
+                if selected_supplier and not st.session_state.header_data.empty:
+                    supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
+                    if supp_data:
+                        st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
+                        st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
+                        st.success(f"Linked to ID: {supp_data['ID']}")
+                        # Force refresh to show in table
+                        st.rerun()
 
+        # 5. Display Data
         edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
         st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
