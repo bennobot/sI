@@ -159,8 +159,8 @@ def run_reconciliation_check(lines_df):
     logs = []
     df = lines_df.copy()
     
-    # Init columns if missing
-    if 'Shopify_Status' not in df.columns: df['Shopify_Status'] = "Pending"
+    # Init columns
+    df['Shopify_Status'] = "Pending"
     df['London_SKU'] = ""     
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
@@ -169,6 +169,7 @@ def run_reconciliation_check(lines_df):
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
+    # Bulk Fetch
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
@@ -188,7 +189,7 @@ def run_reconciliation_check(lines_df):
         if inv_pack in ["", "nan", "0"]: inv_pack = "1"
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"Checking: **{inv_prod_name}**")
+        logs.append(f"Checking: **{inv_prod_name}** ({inv_pack}x {inv_vol})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
@@ -197,37 +198,53 @@ def run_reconciliation_check(lines_df):
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
+                
+                # --- SMARTER MATCHING LOGIC RESTORED ---
+                
+                # 1. Clean Title (Strip L-Supplier / ...)
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
-                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
-                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
-                if score > 40: scored_candidates.append((score, prod))
+                # 2. Use Token SET Ratio (better for partial overlaps)
+                score = fuzz.token_set_ratio(inv_prod_name, shop_prod_name_clean)
+                
+                # Boost if exact substring found
+                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 15
+                
+                if score > 50: 
+                    scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
             for score, prod in scored_candidates:
+                # Log top candidates to help debug
+                if score > 60:
+                     logs.append(f"   Candidate: `{prod['title']}` ({score}%)")
+                
                 if score < 60: continue
+                
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     v_sku = str(variant.get('sku', '')).strip()
                     
+                    # Pack Check
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
                     else:
                         if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
                     
+                    # Vol Check
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
                     if pack_ok and vol_ok:
-                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
+                        logs.append(f"      ✅ **MATCH**: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
                         if v_sku and len(v_sku) > 2:
