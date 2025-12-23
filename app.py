@@ -58,15 +58,13 @@ def get_cin7_base_url():
     if "cin7" not in st.secrets: return None
     return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
 
-@st.cache_data(ttl=3600) # Cache for 1 hour
+@st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
     """
     Fetches ALL suppliers from Cin7 using urllib (Low-level).
-    Includes Debugging Output if list is empty.
+    Corrected Key: 'SupplierList'
     """
-    if "cin7" not in st.secrets: 
-        st.sidebar.error("Cin7 Secrets missing. Cannot fetch suppliers.")
-        return []
+    if "cin7" not in st.secrets: return []
     creds = st.secrets["cin7"]
     
     headers = {
@@ -88,20 +86,21 @@ def fetch_all_cin7_suppliers_cached():
                 if response.getcode() == 200:
                     data = json.loads(response.read())
                     
-                    if "Suppliers" in data and data["Suppliers"]:
-                        for s in data["Suppliers"]:
+                    # FIX: Check for "SupplierList" instead of "Suppliers"
+                    # Also handle case variations just to be safe
+                    key = "SupplierList" if "SupplierList" in data else "Suppliers"
+                    
+                    if key in data and data[key]:
+                        for s in data[key]:
                             all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
                         
-                        if len(data["Suppliers"]) < 100: break
+                        if len(data[key]) < 100: break
                         page += 1
-                    else: # No more suppliers
+                    else:
                         break
-                else: # API returned error code
-                    st.sidebar.error(f"Cin7 API Error (Status {response.getcode()}): {response.read().decode()}")
+                else:
                     break
-    except Exception as e:
-        st.sidebar.error(f"Cin7 Connection Exception: {e}")
-        return []
+    except: pass
     
     return sorted(all_suppliers, key=lambda x: x['Name'].lower())
 
