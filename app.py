@@ -151,8 +151,8 @@ def run_reconciliation_check(lines_df):
     
     # Init columns
     df['Shopify_Status'] = "Pending"
-    df['Matched_Product'] = "" # NEW
-    df['Matched_Variant'] = "" # NEW
+    df['Matched_Product'] = "" # Stores full clean title
+    df['Matched_Variant'] = "" 
     df['Image'] = ""
     df['London_SKU'] = ""     
     df['Cin7_London_ID'] = "" 
@@ -199,19 +199,19 @@ def run_reconciliation_check(lines_df):
                 shop_title_full = prod['title']
                 shop_prod_name_clean = shop_title_full
                 
-                # Clean L-Supplier / Product Name
+                # Logic: Parse L-Supplier / Product Name for MATCHING SCORE only
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
-                if score > 40: scored_candidates.append((score, prod, shop_prod_name_clean))
+                if score > 40: scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
-            for score, prod, clean_name in scored_candidates:
+            for score, prod in scored_candidates:
                 if score < 75: continue 
                 
                 for v_edge in prod['variants']['edges']:
@@ -238,9 +238,15 @@ def run_reconciliation_check(lines_df):
                         status = "✅ Matched"
                         match_found = True
                         
-                        # Populate Data
-                        matched_prod_name = clean_name
+                        # --- DISPLAY LOGIC: Full Name minus L-/G- Prefix ---
+                        full_title = prod['title']
+                        if full_title.startswith("L-") or full_title.startswith("G-"):
+                            matched_prod_name = full_title[2:] # Remove first 2 chars
+                        else:
+                            matched_prod_name = full_title
+                            
                         matched_var_name = variant['title']
+                        
                         if prod.get('featuredImage'):
                             img_url = prod['featuredImage']['url']
                         
@@ -249,8 +255,11 @@ def run_reconciliation_check(lines_df):
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
                         break
+                
                 if match_found: break
-            if not match_found: status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+            
+            if not match_found: 
+                status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
