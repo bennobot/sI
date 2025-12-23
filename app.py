@@ -72,48 +72,36 @@ def get_cin7_product_id(sku):
 # ==========================================
 # 1B. SHOPIFY ENGINE
 # ==========================================
+# ==========================================
+# 1B. SHOPIFY ENGINE (FIXED SIZE MATCHING)
+# ==========================================
+
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
-    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
+    # Fetch variants
     query = """
     query ($query: String!, $cursor: String) {
       products(first: 50, query: $query, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
+        pageInfo { hasNextPage endCursor }
         edges {
           node {
-            id
-            title
-            status
-            format_meta: metafield(namespace: "custom", key: "Format") { value }
-            abv_meta: metafield(namespace: "custom", key: "ABV") { value }
+            id title status
             variants(first: 20) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  inventoryQuantity
-                }
-              }
+              edges { node { id title sku inventoryQuantity } }
             }
           }
         }
       }
     }
     """
-    
     search_vendor = vendor.replace("'", "\\'") 
-    # Search everything (Active, Draft, Archived)
     search_query = f"vendor:'{search_vendor}'"
     
     all_products = []
@@ -127,39 +115,35 @@ def fetch_shopify_products_by_vendor(vendor):
             if response.status_code == 200:
                 data = response.json()
                 if "data" in data and "products" in data["data"]:
-                    
-                    # Add products to list
-                    products_data = data["data"]["products"]
-                    all_products.extend(products_data["edges"])
-                    
-                    # Pagination Logic
-                    page_info = products_data["pageInfo"]
-                    has_next = page_info["hasNextPage"]
-                    cursor = page_info["endCursor"]
-                else:
-                    has_next = False
-            else:
-                has_next = False
-        except:
-            has_next = False
+                    p_data = data["data"]["products"]
+                    all_products.extend(p_data["edges"])
+                    has_next = p_data["pageInfo"]["hasNextPage"]
+                    cursor = p_data["pageInfo"]["endCursor"]
+                else: has_next = False
+            else: has_next = False
+        except: has_next = False
             
     return all_products
 
 def normalize_vol_string(v_str):
     if not v_str: return "0"
     v_str = str(v_str).lower().strip()
-    nums = re.findall(r'\d+', v_str)
+    nums = re.findall(r'\d+\.?\d*', v_str) # Catch decimals like 4.5
     if not nums: return "0"
     val = float(nums[0])
-    if "ml" in v_str: val = val / 10
-    return str(int(val))
+    
+    # Metric conversions
+    if "ml" in v_str: val = val / 10 # 440ml -> 44
+    
+    # Return integer if whole number, else string (e.g. "4.5")
+    if val.is_integer(): return str(int(val))
+    return str(val)
 
 def run_reconciliation_check(lines_df):
     if lines_df.empty: return lines_df, ["No Lines to check."]
     logs = []
     df = lines_df.copy()
     
-    # Init columns
     df['Shopify_Status'] = "Pending"
     df['London_SKU'] = ""     
     df['Cin7_London_ID'] = "" 
@@ -169,7 +153,6 @@ def run_reconciliation_check(lines_df):
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    # Bulk Fetch
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
@@ -183,13 +166,20 @@ def run_reconciliation_check(lines_df):
     for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
         london_sku, glou_sku, cin7_l_id, cin7_g_id = "", "", "", ""
+        
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
-        inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
-        if inv_pack in ["", "nan", "0"]: inv_pack = "1"
+        
+        # --- FIX: Handle Empty/None Pack Size ---
+        raw_pack = str(row.get('Pack_Size', '')).strip()
+        if raw_pack.lower() in ['none', 'nan', '', '0']:
+            inv_pack = "1"
+        else:
+            inv_pack = raw_pack.replace('.0', '')
+            
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"Checking: **{inv_prod_name}** ({inv_pack}x {inv_vol})")
+        logs.append(f"Checking: **{inv_prod_name}** (Pack:{inv_pack} Vol:{inv_vol})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
@@ -198,32 +188,21 @@ def run_reconciliation_check(lines_df):
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
-                
-                # --- SMARTER MATCHING LOGIC RESTORED ---
-                
-                # 1. Clean Title (Strip L-Supplier / ...)
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
-                # 2. Use Token SET Ratio (better for partial overlaps)
-                score = fuzz.token_set_ratio(inv_prod_name, shop_prod_name_clean)
-                
-                # Boost if exact substring found
+                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 15
+                if score > 100: score = 100 # Cap at 100
                 
-                if score > 50: 
-                    scored_candidates.append((score, prod))
+                if score > 40: scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
             for score, prod in scored_candidates:
-                # Log top candidates to help debug
-                if score > 60:
-                     logs.append(f"   Candidate: `{prod['title']}` ({score}%)")
-                
                 if score < 60: continue
                 
                 for v_edge in prod['variants']['edges']:
@@ -231,20 +210,31 @@ def run_reconciliation_check(lines_df):
                     v_title = variant['title'].lower()
                     v_sku = str(variant.get('sku', '')).strip()
                     
-                    # Pack Check
+                    # --- PACK SIZE MATCHING ---
                     pack_ok = False
                     if inv_pack == "1":
-                        if " x " not in v_title: pack_ok = True
+                        # If pack is 1, ensure title DOES NOT contain "X x"
+                        if " x " not in v_title and " pack" not in v_title: 
+                            pack_ok = True
                     else:
-                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                        # If pack > 1, ensure title DOES contain it
+                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: 
+                            pack_ok = True
                     
-                    # Vol Check
+                    # --- VOLUME MATCHING (WITH SYNONYMS) ---
                     vol_ok = False
+                    # Direct number match (e.g. "44" in "440ml")
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
+                    # Cask Synonyms
+                    if inv_vol == "9" and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
+                    if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
+
                     if pack_ok and vol_ok:
-                        logs.append(f"      ✅ **MATCH**: `{variant['title']}` | SKU: `{v_sku}`")
+                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
                         if v_sku and len(v_sku) > 2:
@@ -252,7 +242,9 @@ def run_reconciliation_check(lines_df):
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
                         break
-                if match_found: break
+                
+                # If we found matches AND generated SKUs, we can stop searching products
+                if match_found and london_sku: break
             
             if not match_found: 
                 status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
