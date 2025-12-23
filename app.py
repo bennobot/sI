@@ -9,6 +9,7 @@ import io
 import requests
 import time
 from urllib.parse import quote
+from urllib.request import Request, urlopen # Added for robust Cin7 fetch
 from streamlit_gsheets import GSheetsConnection
 from thefuzz import process, fuzz
 from google.oauth2 import service_account
@@ -41,17 +42,25 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. CIN7 CORE ENGINE
+# 1. CIN7 CORE ENGINE
 # ==========================================
 
-from urllib.request import Request, urlopen
+def get_cin7_headers():
+    if "cin7" not in st.secrets: return None
+    creds = st.secrets["cin7"]
+    return {
+        "api-auth-accountid": creds.get("account_id"),
+        "api-auth-applicationkey": creds.get("api_key"),
+        "Content-Type": "application/json"
+    }
+
+def get_cin7_base_url():
+    if "cin7" not in st.secrets: return None
+    return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
 
 @st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
-    """
-    Fetches ALL suppliers from Cin7 for Dropdown using urllib (Low-level).
-    Includes Debugging Output if list is empty.
-    """
+    """Fetches ALL suppliers from Cin7 using urllib (Low-level)"""
     if "cin7" not in st.secrets: return []
     creds = st.secrets["cin7"]
     
@@ -68,36 +77,42 @@ def fetch_all_cin7_suppliers_cached():
     
     try:
         while True:
-            # Manual URL construction
             url = f"{base_url}/supplier?Page={page}&Limit=100"
             req = Request(url, headers=headers)
             
             with urlopen(req) as response:
                 if response.getcode() == 200:
                     data = json.loads(response.read())
-                    
-                    # DEBUG: If page 1 has no suppliers, print structure
-                    if page == 1 and ("Suppliers" not in data or not data["Suppliers"]):
-                        st.sidebar.warning(f"Cin7 API Connected but returned: {list(data.keys())}")
-                    
                     if "Suppliers" in data and data["Suppliers"]:
                         for s in data["Suppliers"]:
                             all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
-                        
                         if len(data["Suppliers"]) < 100: break
                         page += 1
-                    else:
-                        break
-                else:
-                    break
-    except Exception as e:
-        st.sidebar.error(f"Cin7 Fetch Error: {e}")
-        return []
+                    else: break
+                else: break
+    except: pass
     
     return sorted(all_suppliers, key=lambda x: x['Name'].lower())
 
+def get_cin7_product_id(sku):
+    headers = get_cin7_headers()
+    if not headers: return None
+    
+    # Use params dict for safe encoding
+    url = f"{get_cin7_base_url()}/product"
+    params = {"Sku": sku}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            if "Products" in data and len(data["Products"]) > 0:
+                return data["Products"][0]["ID"]
+    except: pass
+    return None
+
 # ==========================================
-# 1B. SHOPIFY ENGINE (ROBUST & PAGINATED)
+# 2. SHOPIFY ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -106,11 +121,9 @@ def fetch_shopify_products_by_vendor(vendor):
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
     version = creds.get("api_version", "2024-04")
-    
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # QUERY WITH PAGINATION & STATUS FIELD
     query = """
     query ($query: String!, $cursor: String) {
       products(first: 50, query: $query, after: $cursor) {
@@ -129,8 +142,7 @@ def fetch_shopify_products_by_vendor(vendor):
     }
     """
     search_vendor = vendor.replace("'", "\\'") 
-    # SEARCH EVERYTHING
-    variables = {"query": f"vendor:'{search_vendor}'"}
+    variables = {"query": f"vendor:'{search_vendor}'"} 
     
     all_products = []
     cursor = None
@@ -213,37 +225,19 @@ def run_reconciliation_check(lines_df):
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
-                
-                # CLEAN TITLE LOGIC
-                # "G-Supplier / Product / ..." -> "Product"
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
-                # DUAL MATCHING STRATEGY
-                # 1. Token Sort (Exact words, any order)
-                score_sort = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
-                # 2. Token Set (Substrings match)
-                score_set = fuzz.token_set_ratio(inv_prod_name, shop_prod_name_clean)
-                
-                final_score = max(score_sort, score_set)
-                
-                # Exact match boost
-                if inv_prod_name.lower() == shop_prod_name_clean.lower(): final_score = 100
-                
-                if final_score > 40:
-                    scored_candidates.append((final_score, prod, shop_prod_name_clean))
+                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
+                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
+                if score > 40: scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
-            # Show best guess in logs
-            if scored_candidates:
-                best = scored_candidates[0]
-                logs.append(f"   Best Guess: `{best[2]}` ({best[0]}%)")
-
-            for score, prod, clean_name in scored_candidates:
+            for score, prod in scored_candidates:
                 if score < 75: continue 
                 
                 for v_edge in prod['variants']['edges']:
@@ -251,44 +245,38 @@ def run_reconciliation_check(lines_df):
                     v_title = variant['title'].lower()
                     v_sku = str(variant.get('sku', '')).strip()
                     
-                    # Pack Check
                     pack_ok = False
                     if inv_pack == "1":
-                        if " x " not in v_title and " pack" not in v_title: pack_ok = True
+                        if " x " not in v_title: pack_ok = True
                     else:
                         if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
                     
-                    # Vol Check
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
-                    # Synonyms
                     if inv_vol == "9" and "firkin" in v_title: vol_ok = True
                     if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
                     if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
                     if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
-                    
+
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
-                        
-                        # BUILD SKUs
                         if v_sku and len(v_sku) > 2:
-                            base_sku = v_sku[2:] # Strip L- or G-
-                            if not london_sku: london_sku = f"L-{base_sku}"
-                            if not glou_sku: glou_sku = f"G-{base_sku}"
+                            base_sku = v_sku[2:]
+                            london_sku = f"L-{base_sku}"
+                            glou_sku = f"G-{base_sku}"
                         
-                        # Don't break inner loop, we might find other variants (L vs G)
+                        # Don't break, keep looking for other SKU (L vs G)
                 
-                # Stop searching ONLY if we found both SKUs
                 if match_found and london_sku and glou_sku: break
             
             if not match_found: 
                 status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
         
-        # --- CIN7 CHECK (Re-integrated) ---
+        # --- SAFE CIN7 CALLS ---
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
 
@@ -302,7 +290,7 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 2. DATA & DRIVE FUNCTIONS
+# 3. HELPER FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -365,6 +353,41 @@ def create_product_matrix(df):
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
 
+def reconstruct_lines_from_matrix(matrix_df):
+    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
+    new_lines = []
+    for _, row in matrix_df.iterrows():
+        base = {
+            'Supplier_Name': row.get('Supplier_Name', ''),
+            'Collaborator': row.get('Collaborator', ''),
+            'Product_Name': row.get('Product_Name', ''),
+            'ABV': row.get('ABV', '')
+        }
+        for i in range(1, 4):
+            fmt = row.get(f'Format{i}')
+            if pd.notna(fmt) and str(fmt).strip():
+                line = base.copy()
+                line['Format'] = fmt
+                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
+                line['Volume'] = row.get(f'Volume{i}', '')
+                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
+                line['Quantity'] = row.get(f'Quantity{i}', 0)
+                new_lines.append(line)
+    return pd.DataFrame(new_lines)
+
+def create_product_checker(df):
+    if df is None or df.empty: return pd.DataFrame()
+    checker_rows = []
+    for _, row in df.iterrows():
+        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
+        parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
+        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
+        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
+        vol = str(row['Volume'])
+        col2 = f"{pack}x{vol}" if (pack and pack != '0' and pack != '1') else vol
+        checker_rows.append({"ERP_String": col1, "Size_String": col2})
+    return pd.DataFrame(checker_rows).drop_duplicates()
+
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
@@ -397,7 +420,7 @@ def download_file_from_drive(file_id):
     return file_stream
 
 # ==========================================
-# 3. SESSION & SIDEBAR
+# 4. SESSION & SIDEBAR
 # ==========================================
 
 # Initialize Session State
@@ -453,7 +476,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 4. MAIN LOGIC (SOURCE SELECTION)
+# 5. MAIN LOGIC (SOURCE SELECTION)
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -476,7 +499,6 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -567,9 +589,9 @@ if st.button("🚀 Process Invoice", type="primary"):
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
-                # Clear Logs
-                st.session_state.shopify_logs = []
+                # Clear old data
                 st.session_state.matrix_data = None
+                st.session_state.shopify_logs = []
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
 
@@ -579,7 +601,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 5. DISPLAY
+# 6. DISPLAY
 # ==========================================
 
 if st.session_state.header_data is not None:
