@@ -181,7 +181,7 @@ def run_reconciliation_check(lines_df):
         
         logs.append(f"Checking: **{inv_prod_name}** (Pack:{inv_pack} Vol:{inv_vol})")
 
-        if supplier in shopify_cache and shopify_cache[supplier]:
+     if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
             
@@ -193,22 +193,23 @@ def run_reconciliation_check(lines_df):
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
+                # CHANGED: Use Token SORT Ratio (Stricter than Set Ratio)
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
-                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 15
-                if score > 100: score = 100 # Cap at 100
                 
-                if score > 40: scored_candidates.append((score, prod))
+                # Only boost slightly for exact substring match
+                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 5
+                
+                # CHANGED: Threshold increased to 60 (was 40)
+                if score > 60: 
+                    scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
             for score, prod in scored_candidates:
-                if score < 60: continue
-                
-                for v_edge in prod['variants']['edges']:
-                    variant = v_edge['node']
-                    v_title = variant['title'].lower()
-                    v_sku = str(variant.get('sku', '')).strip()
+                # CHANGED: Only accept scores >= 85% for a match
+                if score < 85: continue 
+            
                     
                     # --- PACK SIZE MATCHING ---
                     pack_ok = False
