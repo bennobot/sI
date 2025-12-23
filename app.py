@@ -44,67 +44,57 @@ st.title("Brewery Invoice Parser ⚡")
 # 1A. CIN7 CORE ENGINE
 # ==========================================
 
-def get_cin7_headers():
-    if "cin7" not in st.secrets: return None
-    creds = st.secrets["cin7"]
-    return {
-        "api-auth-accountid": creds.get("account_id"),
-        "api-auth-applicationkey": creds.get("api_key"),
-        "Content-Type": "application/json"
-    }
-
-def get_cin7_base_url():
-    if "cin7" not in st.secrets: return None
-    return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
+from urllib.request import Request, urlopen
 
 @st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
-    """Fetches ALL suppliers from Cin7 for Dropdown"""
-    headers = get_cin7_headers()
-    if not headers: return []
+    """
+    Fetches ALL suppliers from Cin7 for Dropdown using urllib (Low-level).
+    Includes Debugging Output if list is empty.
+    """
+    if "cin7" not in st.secrets: return []
+    creds = st.secrets["cin7"]
     
+    # Headers exactly as Postman sends them
+    headers = {
+        'Content-Type': 'application/json',
+        'api-auth-accountid': creds.get("account_id"),
+        'api-auth-applicationkey': creds.get("api_key")
+    }
+    
+    base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
     all_suppliers = []
     page = 1
-    base_url = get_cin7_base_url()
     
     try:
         while True:
             # Manual URL construction
             url = f"{base_url}/supplier?Page={page}&Limit=100"
-            r = requests.get(url, headers=headers)
+            req = Request(url, headers=headers)
             
-            if r.status_code == 200:
-                data = r.json()
-                if "Suppliers" in data and data["Suppliers"]:
-                    for s in data["Suppliers"]:
-                        all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
+            with urlopen(req) as response:
+                if response.getcode() == 200:
+                    data = json.loads(response.read())
                     
-                    if len(data["Suppliers"]) < 100: break
-                    page += 1
-                else: break
-            else: break
-            
-    except: pass
+                    # DEBUG: If page 1 has no suppliers, print structure
+                    if page == 1 and ("Suppliers" not in data or not data["Suppliers"]):
+                        st.sidebar.warning(f"Cin7 API Connected but returned: {list(data.keys())}")
+                    
+                    if "Suppliers" in data and data["Suppliers"]:
+                        for s in data["Suppliers"]:
+                            all_suppliers.append({"Name": s["Name"], "ID": s["ID"]})
+                        
+                        if len(data["Suppliers"]) < 100: break
+                        page += 1
+                    else:
+                        break
+                else:
+                    break
+    except Exception as e:
+        st.sidebar.error(f"Cin7 Fetch Error: {e}")
+        return []
     
-    # Sort alphabetically
     return sorted(all_suppliers, key=lambda x: x['Name'].lower())
-
-def get_cin7_product_id(sku):
-    headers = get_cin7_headers()
-    if not headers: return None
-    
-    # Use params dict for safe encoding
-    url = f"{get_cin7_base_url()}/product"
-    params = {"Sku": sku}
-    
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            if "Products" in data and len(data["Products"]) > 0:
-                return data["Products"][0]["ID"]
-    except: pass
-    return None
 
 # ==========================================
 # 1B. SHOPIFY ENGINE (ROBUST & PAGINATED)
