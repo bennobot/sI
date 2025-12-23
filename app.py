@@ -661,51 +661,70 @@ if st.session_state.header_data is not None:
                 st.write(st.session_state.cin7_supplier_list)
 
 # ==========================================
-# 6. DEVELOPER SANDBOX (HIDDEN)
+# 6. DEVELOPER SANDBOX (DIAGNOSTIC MODE)
 # ==========================================
 
-# Add a toggle in the sidebar (only visible if you know where to look)
 if st.sidebar.checkbox("🛠️ Developer Mode", value=False):
     st.divider()
-    st.title("🧪 Cin7 Connection Sandbox")
+    st.subheader("🧪 Cin7 Diagnostics")
     
-    if st.button("Run Connection Test"):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        endpoint_choice = st.radio("Select Endpoint:", ["/supplier", "/product", "/customer"])
         
-        # 1. Credentials Check
-        if "cin7" not in st.secrets:
-            st.error("No Cin7 secrets found.")
-        else:
+    with col2:
+        if st.button("Run Diagnostic"):
+            
+            if "cin7" not in st.secrets:
+                st.error("❌ No [cin7] secrets found.")
+                st.stop()
+                
             creds = st.secrets["cin7"]
-            
-            # 2. Raw Request Test
             base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
-           # Try without query parameters first
-            url = f"{base_url}/supplier"
-            # Pass headers only, no params dict
-            response = requests.get(url, headers=headers)
             
+            # Headers (Case sensitive for some servers)
             headers = {
                 "api-auth-accountid": creds.get("account_id"),
                 "api-auth-applicationkey": creds.get("api_key"),
                 "Content-Type": "application/json"
             }
             
-            st.write(f"Attempting GET to: `{url}`")
+            # 1. Clean URL (No params)
+            url = f"{base_url}{endpoint_choice}"
+            
+            st.info(f"GET: {url}")
             
             try:
+                # Making request without params first to test defaults
                 response = requests.get(url, headers=headers)
-                st.write(f"Status Code: `{response.status_code}`")
+                
+                st.write(f"**Status Code:** `{response.status_code}`")
                 
                 if response.status_code == 200:
                     data = response.json()
-                    st.success("Connection Successful!")
-                    st.write("First 5 Suppliers found:")
-                    st.json(data.get("Suppliers", []))
                     
-                    # Test the Dropdown logic here
-                    names = [s['Name'] for s in data.get("Suppliers", [])]
-                    sel = st.selectbox("Test Dropdown:", names)
-                    st.write(f"You selected: {sel}")
+                    # 2. Inspect Structure
+                    st.write("**Top-Level Keys:**")
+                    st.code(list(data.keys()))
+                    
+                    # 3. Check Count
+                    if "Total" in data:
+                        st.write(f"**Total Records Available:** {data['Total']}")
+                    
+                    # 4. Dump Data
+                    st.write("**Raw Data (First 3 items):**")
+                    
+                    # Determine key based on endpoint
+                    key_map = {"/supplier": "Suppliers", "/product": "Products", "/customer": "Customers"}
+                    target_key = key_map.get(endpoint_choice, "Suppliers")
+                    
+                    items = data.get(target_key, [])
+                    if items:
+                        st.json(items[:3]) # Show first 3
+                    else:
+                        st.warning(f"Returned list '{target_key}' is empty: []")
+                        st.json(data) # Show everything to debug why
                 else:
                     st.error(f"API Error: {response.text}")
                     
