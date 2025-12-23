@@ -57,42 +57,53 @@ def get_cin7_base_url():
     if "cin7" not in st.secrets: return None
     return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
 
+from urllib.request import Request, urlopen
+import json
+
 def fetch_all_cin7_suppliers_audit():
     """
-    Fetches ALL suppliers from Cin7 for auditing/debugging.
-    Returns DataFrame [Name, ID, Currency]
+    Fetches ALL suppliers from Cin7 using urllib (Low-level).
     """
-    headers = get_cin7_headers()
-    if not headers: return pd.DataFrame()
+    if "cin7" not in st.secrets: return pd.DataFrame()
+    creds = st.secrets["cin7"]
     
-    url = f"{get_cin7_base_url()}/supplier"
+    # EXACT HEADERS
+    headers = {
+        'Content-Type': 'application/json',
+        'api-auth-accountid': creds.get("account_id"),
+        'api-auth-applicationkey': creds.get("api_key")
+    }
+    
+    base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
     all_suppliers = []
     page = 1
     
     try:
         while True:
-            params = {"Page": page, "Limit": 100}
-            response = requests.get(url, headers=headers, params=params)
+            # Construct URL manually
+            url = f"{base_url}/supplier?Page={page}&Limit=100"
+            req = Request(url, headers=headers)
             
-            if response.status_code == 200:
-                data = response.json()
-                if "Suppliers" in data and data["Suppliers"]:
-                    for s in data["Suppliers"]:
-                        all_suppliers.append({
-                            "Name": s.get("Name"),
-                            "ID": s.get("ID"),
-                            "Currency": s.get("Currency"),
-                            "Status": s.get("Status")
-                        })
-                    
-                    if len(data["Suppliers"]) < 100: break # End of list
-                    page += 1
+            with urlopen(req) as response:
+                if response.getcode() == 200:
+                    data = json.loads(response.read())
+                    if "Suppliers" in data and data["Suppliers"]:
+                        for s in data["Suppliers"]:
+                            all_suppliers.append({
+                                "Name": s.get("Name"),
+                                "ID": s.get("ID"),
+                                "Currency": s.get("Currency"),
+                                "Status": s.get("Status")
+                            })
+                        
+                        if len(data["Suppliers"]) < 100: break
+                        page += 1
+                    else:
+                        break
                 else:
+                    st.error(f"Cin7 Error: {response.getcode()}")
                     break
-            else:
-                st.error(f"Cin7 Error: {response.text}")
-                break
-                
+                    
         return pd.DataFrame(all_suppliers)
         
     except Exception as e:
