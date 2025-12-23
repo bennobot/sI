@@ -60,18 +60,12 @@ def get_cin7_base_url():
 @st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
     """Fetches ALL suppliers from Cin7 for Dropdown"""
-    if "cin7" not in st.secrets: return []
-    creds = st.secrets["cin7"]
+    headers = get_cin7_headers()
+    if not headers: return []
     
-    headers = {
-        'Content-Type': 'application/json',
-        'api-auth-accountid': creds.get("account_id"),
-        'api-auth-applicationkey': creds.get("api_key")
-    }
-    
-    base_url = creds.get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
     all_suppliers = []
     page = 1
+    base_url = get_cin7_base_url()
     
     try:
         while True:
@@ -89,7 +83,6 @@ def fetch_all_cin7_suppliers_cached():
                     else: break
                 else: break
     except: pass
-    
     return sorted(all_suppliers, key=lambda x: x['Name'].lower())
 
 def get_cin7_product_id(sku):
@@ -119,7 +112,6 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     
-    # ADDED: featuredImage { url }
     query = """
     query ($query: String!, $cursor: String) {
       products(first: 50, query: $query, after: $cursor) {
@@ -183,7 +175,7 @@ def run_reconciliation_check(lines_df):
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""
-    df['Image'] = ""  # New Column for Image URL
+    df['Image'] = "" 
     
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
@@ -244,7 +236,7 @@ def run_reconciliation_check(lines_df):
                     
                     pack_ok = False
                     if inv_pack == "1":
-                        if " x " not in v_title: pack_ok = True
+                        if " x " not in v_title and " pack" not in v_title: pack_ok = True
                     else:
                         if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
                     
@@ -261,7 +253,7 @@ def run_reconciliation_check(lines_df):
                         status = "✅ Matched"
                         match_found = True
                         
-                        # GET IMAGE
+                        # Get Image
                         if prod.get('featuredImage'):
                             img_url = prod['featuredImage']['url']
                         
@@ -271,7 +263,7 @@ def run_reconciliation_check(lines_df):
                             glou_sku = f"G-{base_sku}"
                         break
                 
-                if match_found: break
+                if match_found and london_sku: break
             
             if not match_found: 
                 status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
@@ -290,7 +282,7 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 2. DATA & DRIVE FUNCTIONS
+# 2. DATA FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -374,19 +366,6 @@ def reconstruct_lines_from_matrix(matrix_df):
                 line['Quantity'] = row.get(f'Quantity{i}', 0)
                 new_lines.append(line)
     return pd.DataFrame(new_lines)
-
-def create_product_checker(df):
-    if df is None or df.empty: return pd.DataFrame()
-    checker_rows = []
-    for _, row in df.iterrows():
-        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
-        parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
-        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
-        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
-        vol = str(row['Volume'])
-        col2 = f"{pack}x{vol}" if (pack and pack != '0' and pack != '1') else vol
-        checker_rows.append({"ERP_String": col1, "Size_String": col2})
-    return pd.DataFrame(checker_rows).drop_duplicates()
 
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
@@ -499,7 +478,6 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
-            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -592,8 +570,6 @@ if st.button("🚀 Process Invoice", type="primary"):
                 
                 # Clear Logs
                 st.session_state.shopify_logs = []
-                st.session_state.cin7_logs = []
-                st.session_state.cin7_supplier_list = []
                 st.session_state.matrix_data = None
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
@@ -643,7 +619,7 @@ if st.session_state.header_data is not None:
         display_df = display_df[final_cols]
         
         # Configure columns (Image & Status)
-        column_cfg = {
+        column_config = {
             "Image": st.column_config.ImageColumn("Img"),
             "Product_Status": st.column_config.TextColumn("Status", disabled=True),
             "Shopify_Variant_ID": st.column_config.TextColumn("Shopify ID", disabled=True),
