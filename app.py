@@ -151,7 +151,7 @@ def run_reconciliation_check(lines_df):
     
     # Init columns
     df['Shopify_Status'] = "Pending"
-    df['Matched_Product'] = "" # Stores full clean title
+    df['Matched_Product'] = ""
     df['Matched_Variant'] = "" 
     df['Image'] = ""
     df['London_SKU'] = ""     
@@ -179,6 +179,7 @@ def run_reconciliation_check(lines_df):
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
+        inv_fmt = str(row.get('Format', '')).lower()
         
         raw_pack = str(row.get('Pack_Size', '')).strip()
         if raw_pack.lower() in ['none', 'nan', '', '0']:
@@ -188,24 +189,25 @@ def run_reconciliation_check(lines_df):
             
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"Checking: **{inv_prod_name}**")
+        logs.append(f"Checking: **{inv_prod_name}** ({inv_fmt} / {inv_pack}x {inv_vol})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
             
+            # 1. Fuzzy Match Names
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 shop_prod_name_clean = shop_title_full
                 
-                # Logic: Parse L-Supplier / Product Name for MATCHING SCORE only
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
+                
                 if score > 40: scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
@@ -214,6 +216,44 @@ def run_reconciliation_check(lines_df):
             for score, prod in scored_candidates:
                 if score < 75: continue 
                 
+                # --- FORMAT CHECK (NEW) ---
+                # Check 1: Metafield
+                shop_meta_fmt = prod.get('format_meta', {})
+                shop_fmt_val = shop_meta_fmt.get('value', '').lower() if shop_meta_fmt else ""
+                
+                # Check 2: Title Scan (Fallback)
+                shop_title_lower = prod['title'].lower()
+                
+                is_format_match = False
+                
+                # Logic: If invoice says "Steel Keg", Shopify MUST say "Steel" or "Stainless"
+                if "steel" in inv_fmt:
+                    if "steel" in shop_fmt_val or "stainless" in shop_fmt_val or "steel" in shop_title_lower:
+                        is_format_match = True
+                    # Explicitly fail if it matches "Poly" or "KeyKeg"
+                    if "poly" in shop_fmt_val or "keykeg" in shop_fmt_val:
+                        is_format_match = False
+                elif "poly" in inv_fmt:
+                    if "poly" in shop_fmt_val or "poly" in shop_title_lower:
+                        is_format_match = True
+                elif "keykeg" in inv_fmt:
+                    if "keykeg" in shop_fmt_val or "keykeg" in shop_title_lower:
+                        is_format_match = True
+                elif "cask" in inv_fmt:
+                    if "cask" in shop_fmt_val or "firkin" in shop_fmt_val or "cask" in shop_title_lower:
+                        is_format_match = True
+                elif "can" in inv_fmt:
+                    if "can" in shop_fmt_val or "can" in shop_title_lower:
+                        is_format_match = True
+                else:
+                    # Loose matching for other types
+                    is_format_match = True
+                
+                if not is_format_match:
+                    logs.append(f"   Skipping `{prod['title']}` - Format Mismatch (Inv: {inv_fmt} vs Shop: {shop_fmt_val})")
+                    continue
+
+                # --- VARIANT CHECK ---
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
@@ -238,15 +278,13 @@ def run_reconciliation_check(lines_df):
                         status = "✅ Matched"
                         match_found = True
                         
-                        # --- DISPLAY LOGIC: Full Name minus L-/G- Prefix ---
                         full_title = prod['title']
                         if full_title.startswith("L-") or full_title.startswith("G-"):
-                            matched_prod_name = full_title[2:] # Remove first 2 chars
+                            matched_prod_name = full_title[2:]
                         else:
                             matched_prod_name = full_title
                             
                         matched_var_name = variant['title']
-                        
                         if prod.get('featuredImage'):
                             img_url = prod['featuredImage']['url']
                         
@@ -259,7 +297,7 @@ def run_reconciliation_check(lines_df):
                 if match_found: break
             
             if not match_found: 
-                status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+                status = "❌ Size/Format Missing" if scored_candidates else "🆕 New Product"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
