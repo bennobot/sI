@@ -57,12 +57,9 @@ def get_cin7_base_url():
     if "cin7" not in st.secrets: return None
     return st.secrets["cin7"].get("base_url", "https://inventory.dearsystems.com/ExternalApi/v2")
 
-@st.cache_data(ttl=3600) # Cache for 1 hour
+@st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
-    """
-    Fetches ALL suppliers from Cin7 (Paginated).
-    Returns list of dicts: [{'Name': '...', 'ID': '...'}]
-    """
+    """Fetches ALL suppliers from Cin7 for Dropdown"""
     headers = get_cin7_headers()
     if not headers: return []
     
@@ -72,7 +69,7 @@ def fetch_all_cin7_suppliers_cached():
     
     try:
         while True:
-            # Manual URL construction (Safe)
+            # Manual URL construction
             url = f"{base_url}/supplier?Page={page}&Limit=100"
             r = requests.get(url, headers=headers)
             
@@ -89,6 +86,7 @@ def fetch_all_cin7_suppliers_cached():
             
     except: pass
     
+    # Sort alphabetically
     return sorted(all_suppliers, key=lambda x: x['Name'].lower())
 
 def get_cin7_product_id(sku):
@@ -172,6 +170,7 @@ def run_reconciliation_check(lines_df):
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
+            
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
@@ -187,7 +186,7 @@ def run_reconciliation_check(lines_df):
             match_found = False
             
             for score, prod in scored_candidates:
-                if score < 75: continue 
+                if score < 60: continue
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
@@ -200,11 +199,6 @@ def run_reconciliation_check(lines_df):
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
-                    if inv_vol == "9" and "firkin" in v_title: vol_ok = True
-                    if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
-                    if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
-                    if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
-                    
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
@@ -230,7 +224,7 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 2. DATA FUNCTIONS
+# 2. DATA & DRIVE FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -521,8 +515,6 @@ if st.button("🚀 Process Invoice", type="primary"):
                 # Clear old data
                 st.session_state.matrix_data = None
                 st.session_state.shopify_logs = []
-                st.session_state.cin7_logs = []
-                st.session_state.cin7_supplier_list = []
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
 
