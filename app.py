@@ -111,36 +111,49 @@ def run_reconciliation_check(lines_df):
     logs = []
     df = lines_df.copy()
     
+    # Init columns
     df['Shopify_Status'] = "Pending"
     df['London_SKU'] = ""     
+    df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
+    df['Cin7_Glou_ID'] = ""   
     
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    # 1. Fetch
     progress_bar = st.progress(0)
     for i, supplier in enumerate(suppliers):
         progress_bar.progress((i)/len(suppliers))
         logs.append(f"🔎 **Fetching Shopify Data:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
-        logs.append(f"   -> Retrieved {len(products)} products.")
+        logs.append(f"   -> Found {len(products)} products.")
     progress_bar.progress(1.0)
 
-    # 2. Match
     results = []
     for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
-        london_sku, glou_sku = "", ""
-        
+        london_sku, glou_sku, cin7_l_id, cin7_g_id = "", "", "", ""
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
-        inv_pack = str(row.get('Pack_Size', '1')).replace('.0', '')
-        if inv_pack in ["", "nan", "0"]: inv_pack = "1"
+        
+        # --- ROBUST PACK SIZE HANDLING ---
+        raw_pack = row.get('Pack_Size')
+        
+        # 1. Handle None / NaN types directly
+        if pd.isna(raw_pack) or raw_pack is None or raw_pack == "":
+            inv_pack = "1"
+        else:
+            # 2. Convert to string and clean
+            inv_pack_str = str(raw_pack).strip().lower()
+            if inv_pack_str in ['0', '1', 'none', 'nan']:
+                inv_pack = "1"
+            else:
+                inv_pack = inv_pack_str.replace('.0', '')
+                
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"--- Checking: **{inv_prod_name}** ({inv_pack}x {inv_vol}) ---")
+        logs.append(f"Checking: **{inv_prod_name}** (Pack:{inv_pack} Vol:{inv_vol})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
@@ -149,62 +162,53 @@ def run_reconciliation_check(lines_df):
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
-                
-                # CLEAN TITLE LOGIC
-                # "G-Supplier / Product / ..." -> "Product"
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
                 
-                # DUAL MATCHING STRATEGY
-                # 1. Token Sort (Exact words, any order)
-                score_sort = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
-                # 2. Token Set (Substrings match)
-                score_set = fuzz.token_set_ratio(inv_prod_name, shop_prod_name_clean)
+                score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
+                if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 15
+                if score > 100: score = 100
                 
-                final_score = max(score_sort, score_set)
-                
-                # Exact match boost
-                if inv_prod_name.lower() == shop_prod_name_clean.lower(): final_score = 100
-                
-                if final_score > 40:
-                    scored_candidates.append((final_score, prod, shop_prod_name_clean))
+                if score > 40: scored_candidates.append((score, prod))
             
-            # Sort high to low
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
-            
             match_found = False
             
-            # Log best guess
-            if scored_candidates:
-                best_g = scored_candidates[0]
-                logs.append(f"   Best Guess: `{best_g[2]}` ({best_g[0]}%)")
-            else:
-                logs.append("   ⚠️ No name similarity found (>40%)")
-
-            for score, prod, clean_name in scored_candidates:
-                if score < 75: continue # Threshold
+            for score, prod in scored_candidates:
+                if score < 60: continue
                 
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
                     v_sku = str(variant.get('sku', '')).strip()
                     
-                    # Pack Check
+                    # --- PACK SIZE LOGIC ---
                     pack_ok = False
                     if inv_pack == "1":
-                        if " x " not in v_title: pack_ok = True
+                        # If Pack=1, ensure title DOES NOT say "24 x" or "12 x"
+                        # We look for the pattern "digit x"
+                        if not re.search(r'\d+\s*x', v_title): 
+                            pack_ok = True
                     else:
-                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                        # If Pack=24, ensure title says "24 x" or "24x"
+                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: 
+                            pack_ok = True
                     
-                    # Vol Check
+                    # --- VOLUME LOGIC ---
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
                     
+                    # Synonyms
+                    if inv_vol == "9" and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
+                    if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
+
                     if pack_ok and vol_ok:
-                        logs.append(f"      ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
+                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
                         if v_sku and len(v_sku) > 2:
@@ -217,10 +221,15 @@ def run_reconciliation_check(lines_df):
             
             if not match_found: 
                 status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+        
+        if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
+        if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
 
         row['Shopify_Status'] = status
         row['London_SKU'] = london_sku
+        row['Cin7_London_ID'] = cin7_l_id
         row['Gloucester_SKU'] = glou_sku
+        row['Cin7_Glou_ID'] = cin7_g_id
         results.append(row)
     
     return pd.DataFrame(results), logs
