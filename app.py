@@ -662,7 +662,6 @@ if st.session_state.header_data is not None:
     with current_tabs[0]:
         st.subheader("1. Review & Reconciliation")
         
-        # PREPARE DISPLAY (Left-align Status)
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
             display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
@@ -679,7 +678,6 @@ if st.session_state.header_data is not None:
         final_cols.extend(rem)
         display_df = display_df[final_cols]
         
-        # Configure columns
         column_config = {
             "Image": st.column_config.ImageColumn("Img"),
             "Product_Status": st.column_config.TextColumn("Status", disabled=True),
@@ -687,7 +685,6 @@ if st.session_state.header_data is not None:
             "Matched_Variant": st.column_config.TextColumn("Variant Match", disabled=True),
         }
 
-        # EDIT
         edited_lines = st.data_editor(
             display_df, 
             num_rows="dynamic", 
@@ -696,7 +693,6 @@ if st.session_state.header_data is not None:
             column_config=column_config
         )
         
-        # SYNC BACK (Revert renaming)
         if edited_lines is not None:
             saved_df = edited_lines.copy()
             if 'Product_Status' in saved_df.columns:
@@ -746,7 +742,7 @@ if st.session_state.header_data is not None:
             st.subheader("3. Finalize & Export")
             st.success("✅ All products matched! Ready for export.")
             
-            # 1. Supplier Link
+            # Supplier Link Logic
             current_payee = "Unknown"
             if not st.session_state.header_data.empty:
                  current_payee = st.session_state.header_data.iloc[0]['Payable_To']
@@ -776,12 +772,26 @@ if st.session_state.header_data is not None:
             
             st.divider()
             
-            # 2. Location Select
             st.subheader("🚀 Export Purchase Order")
             po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
             
-            # 3. Export Logic (Placeholder for now)
-            if st.button(f"📤 Export PO to Cin7 ({po_location})"):
-                st.info("Export logic is temporarily disabled. Download CSV below.")
-            
-            st.download_button("📥 Download Final PO CSV", edited_lines.to_csv(index=False), "final_po.csv")
+            # --- ACTIVE PO EXPORT BUTTON ---
+            if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
+                if "cin7" in st.secrets:
+                    with st.spinner("Creating Purchase Order..."):
+                        # We pass the header (for SupplierID) and lines (for Products)
+                        success, msg, logs = create_cin7_purchase_order(
+                            st.session_state.header_data, 
+                            st.session_state.line_items, 
+                            po_location
+                        )
+                        
+                        if success:
+                            st.success(msg)
+                            st.balloons()
+                        else:
+                            st.error(msg)
+                            with st.expander("Error Details"):
+                                for log in logs: st.write(log)
+                else:
+                    st.error("Cin7 Secrets missing.")
