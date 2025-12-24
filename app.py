@@ -122,79 +122,61 @@ def get_cin7_supplier(name):
 def create_cin7_purchase_order(header_df, lines_df, location_choice):
     headers = get_cin7_headers()
     if not headers: return False, "Cin7 Secrets missing.", []
-
     logs = []
     
-    # 1. Get Supplier
+    # 1. Supplier
     supplier_id = None
-    supplier_name = "Unknown"
-    
     if 'Cin7_Supplier_ID' in header_df.columns and header_df.iloc[0]['Cin7_Supplier_ID']:
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
-        supplier_name = header_df.iloc[0]['Cin7_Supplier_Name']
     else:
         supplier_name = header_df.iloc[0]['Payable_To']
         supplier_data = get_cin7_supplier(supplier_name)
-        if supplier_data:
-            supplier_id = supplier_data['ID']
+        if supplier_data: supplier_id = supplier_data['ID']
 
-    if not supplier_id:
-        return False, f"Supplier '{supplier_name}' not linked. Please use the Dropdown in Tab 3.", logs
+    if not supplier_id: return False, "Supplier not linked.", logs
 
-    logs.append(f"Supplier ID: {supplier_id}")
-
-    # 2. Build Lines
-    po_lines = []
-    skipped_count = 0
+    # 2. Build Order Lines
+    order_lines = []
     id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        
-        if row.get('Shopify_Status') != "✅ Matched" or pd.isna(prod_id) or str(prod_id).strip() == "":
-            skipped_count += 1
-            continue
-            
-        qty = float(row.get('Quantity', 0))
-        price = float(row.get('Item_Price', 0))
-        
-        line = {
-            "ProductID": prod_id, 
-            "Quantity": qty, 
-            "Price": price, 
-            "TaxRule": "20% (VAT on Expenses)"
-        }
-        po_lines.append(line)
+        if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
+            order_lines.append({
+                "ProductID": prod_id, 
+                "Quantity": float(row.get('Quantity', 0)), 
+                "Price": float(row.get('Item_Price', 0)), 
+                "TaxRule": "20% (VAT on Expenses)"
+            })
 
-    if not po_lines:
-        return False, "No matched products found to upload.", logs
+    if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Payload
+    # 3. Payload for ADVANCED Purchase
+    # Note: We send to /purchase but with "Order" object populated
     payload = {
         "SupplierID": supplier_id,
         "Location": location_choice, 
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
         "TaxRule": "20% (VAT on Expenses)",
-        "Approach": "STOCK",  # <-- ADDED THIS FIX
-        "Lines": po_lines,
-        "Status": "ORDERING"
+        "Type": "Advanced", # Request Advanced Type
+        "Status": "ORDERING",
+        "Order": {
+            "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
+            "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
+            "Lines": order_lines
+        }
     }
-    
-    inv_num = str(header_df.iloc[0].get('Invoice_Number', ''))
-    if inv_num and inv_num.lower() != 'nan':
-        payload['SupplierInvoiceNumber'] = inv_num
 
     url = f"{get_cin7_base_url()}/purchase"
-    
     try:
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
-            res_json = response.json()
-            return True, f"PO Created Successfully! ID: {res_json.get('ID')}", logs
+            res = response.json()
+            return True, f"Advanced PO Created! ID: {res.get('ID')}", logs
         else:
             return False, f"API Error {response.status_code}: {response.text}", logs
     except Exception as e:
-        return False, f"Exception: {str(e)}", logs
+        return False, f"Error: {e}", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
