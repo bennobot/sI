@@ -175,7 +175,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Location": location_choice, 
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
         "TaxRule": "20% (VAT on Expenses)",
-        "Approach": "Exclusive",  # <-- ADDED THIS FIX
+        "Approach": "STOCK",  # <-- ADDED THIS FIX
         "Lines": po_lines,
         "Status": "ORDERING"
     }
