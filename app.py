@@ -132,10 +132,10 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         supplier_name = header_df.iloc[0]['Payable_To']
         supplier_data = get_cin7_supplier(supplier_name)
         if supplier_data: supplier_id = supplier_data['ID']
-
+        
     if not supplier_id: return False, "Supplier not linked.", logs
 
-    # 2. Build Order Lines
+    # 2. Build Lines
     order_lines = []
     id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
     
@@ -151,33 +151,48 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Payload for ADVANCED Purchase
-    # Note: We send to /purchase but with "Order" object populated
-    payload = {
+    # --- STEP 1: CREATE HEADER (Advanced) ---
+    url_create = f"{get_cin7_base_url()}/purchase"
+    payload_header = {
         "SupplierID": supplier_id,
-        "Location": location_choice, 
+        "Location": location_choice,
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
+        "Type": "Advanced",
         "TaxRule": "20% (VAT on Expenses)",
-        "Type": "Advanced", # Request Advanced Type
-        "Status": "ORDERING",
-        "Approach": "STOCK",
-        "Order": {
-            "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
-            "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
+        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', ''))
+    }
+    
+    task_id = None
+    try:
+        r1 = requests.post(url_create, headers=headers, json=payload_header)
+        if r1.status_code == 200:
+            task_id = r1.json().get('ID')
+            logs.append(f"Step 1: Header Created (ID: {task_id})")
+        else:
+            return False, f"Header Error: {r1.text}", logs
+    except Exception as e:
+        return False, f"Header Ex: {e}", logs
+
+    # --- STEP 2: ADD ORDER LINES ---
+    if task_id:
+        url_lines = f"{get_cin7_base_url()}/purchase/order"
+        payload_lines = {
+            "TaskID": task_id,
+            "CombineAdditionalCharges": False,
+            "Memo": f"Auto-generated via Streamlit",
             "Lines": order_lines
         }
-    }
-
-    url = f"{get_cin7_base_url()}/purchase"
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            res = response.json()
-            return True, f"Advanced PO Created! ID: {res.get('ID')}", logs
-        else:
-            return False, f"API Error {response.status_code}: {response.text}", logs
-    except Exception as e:
-        return False, f"Error: {e}", logs
+        
+        try:
+            r2 = requests.post(url_lines, headers=headers, json=payload_lines)
+            if r2.status_code == 200:
+                return True, f"✅ Advanced PO Created! (ID: {task_id})", logs
+            else:
+                return False, f"Line Item Error: {r2.text}", logs
+        except Exception as e:
+            return False, f"Lines Ex: {e}", logs
+            
+    return False, "Unknown Error", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
