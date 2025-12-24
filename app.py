@@ -160,6 +160,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "TaxRule": "20% (VAT on Expenses)",
         "Type": "Advanced", # Request Advanced Type
         "Status": "ORDERING",
+        "Approach": "STOCK",
         "Order": {
             "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
             "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
