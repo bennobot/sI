@@ -120,14 +120,12 @@ def get_cin7_supplier(name):
     return None
 
 def create_cin7_purchase_order(header_df, lines_df, location_choice):
-    """Creates PO in Cin7 Core"""
     headers = get_cin7_headers()
     if not headers: return False, "Cin7 Secrets missing.", []
 
     logs = []
     
     # 1. Get Supplier
-    # Priority: User selected ID from Header > Extracted Name
     supplier_id = None
     supplier_name = "Unknown"
     
@@ -135,7 +133,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
         supplier_name = header_df.iloc[0]['Cin7_Supplier_Name']
     else:
-        # Fallback search if user didn't link manually
         supplier_name = header_df.iloc[0]['Payable_To']
         supplier_data = get_cin7_supplier(supplier_name)
         if supplier_data:
@@ -154,7 +151,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         
-        # Check if product is matched
         if row.get('Shopify_Status') != "✅ Matched" or pd.isna(prod_id) or str(prod_id).strip() == "":
             skipped_count += 1
             continue
@@ -166,7 +162,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             "ProductID": prod_id, 
             "Quantity": qty, 
             "Price": price, 
-            "TaxRule": "20% (VAT on Expenses)" # Standard UK Rule
+            "TaxRule": "20% (VAT on Expenses)"
         }
         po_lines.append(line)
 
@@ -178,17 +174,18 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "SupplierID": supplier_id,
         "Location": location_choice, 
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
-        "TaxRule": "20% (VAT on Expenses)", 
+        "TaxRule": "20% (VAT on Expenses)",
+        "Approach": "Exclusive",  # <-- ADDED THIS FIX
         "Lines": po_lines,
         "Status": "ORDERING"
     }
     
-    # Add Invoice Number if available
     inv_num = str(header_df.iloc[0].get('Invoice_Number', ''))
     if inv_num and inv_num.lower() != 'nan':
         payload['SupplierInvoiceNumber'] = inv_num
 
     url = f"{get_cin7_base_url()}/purchase"
+    
     try:
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
