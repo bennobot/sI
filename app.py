@@ -128,7 +128,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if 'Cin7_Supplier_ID' in header_df.columns and header_df.iloc[0]['Cin7_Supplier_ID']:
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
     else:
-        # Fallback if user didn't use dropdown (shouldn't happen in new UI)
         supplier_name = header_df.iloc[0]['Payable_To']
         supplier_data = get_cin7_supplier(supplier_name)
         if supplier_data: supplier_id = supplier_data['ID']
@@ -167,7 +166,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Approach": "Stock",
         "TaxRule": "20% (VAT on Expenses)",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
-        "Status": "DRAFT" # Correct Status (All Caps)
+        "Status": "DRAFT"
     }
     
     task_id = None
@@ -181,13 +180,14 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     except Exception as e:
         return False, f"Header Ex: {e}", logs
 
-    # 4. Add Order Lines
+    # 4. Add Order Lines (WITH STATUS)
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
+            "Status": "DRAFT", # <--- ADDED HERE
             "Lines": order_lines
         }
         
