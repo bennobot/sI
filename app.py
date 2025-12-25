@@ -123,25 +123,30 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if not headers: return False, "Cin7 Secrets missing.", []
     logs = []
     
+    # 1. Supplier
     supplier_id = None
     if 'Cin7_Supplier_ID' in header_df.columns and header_df.iloc[0]['Cin7_Supplier_ID']:
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
     else:
+        # Fallback if user didn't use dropdown (shouldn't happen in new UI)
         supplier_name = header_df.iloc[0]['Payable_To']
         supplier_data = get_cin7_supplier(supplier_name)
         if supplier_data: supplier_id = supplier_data['ID']
 
     if not supplier_id: return False, "Supplier not linked.", logs
 
+    # 2. Build Lines
     order_lines = []
     id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
+            
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = qty * price
+            
             order_lines.append({
                 "ProductID": prod_id, 
                 "Quantity": qty, 
@@ -152,7 +157,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # Step 1: Create Header
+    # 3. Create Header (Advanced)
     url_create = f"{get_cin7_base_url()}/purchase"
     payload_header = {
         "SupplierID": supplier_id,
@@ -161,7 +166,8 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Type": "Advanced",
         "Approach": "Stock",
         "TaxRule": "20% (VAT on Expenses)",
-        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', ''))
+        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
+        "Status": "DRAFT" # Correct Status (All Caps)
     }
     
     task_id = None
@@ -169,25 +175,30 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         r1 = requests.post(url_create, headers=headers, json=payload_header)
         if r1.status_code == 200:
             task_id = r1.json().get('ID')
-        else: return False, f"Header Error: {r1.text}", logs
-    except Exception as e: return False, f"Header Ex: {e}", logs
+            logs.append(f"Step 1: Header Created (ID: {task_id})")
+        else:
+            return False, f"Header Error: {r1.text}", logs
+    except Exception as e:
+        return False, f"Header Ex: {e}", logs
 
-    # Step 2: Add Lines
+    # 4. Add Order Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "Draft",
             "Lines": order_lines
         }
+        
         try:
             r2 = requests.post(url_lines, headers=headers, json=payload_lines)
             if r2.status_code == 200:
                 return True, f"✅ Advanced PO Created! (ID: {task_id})", logs
-            else: return False, f"Line Item Error: {r2.text}", logs
-        except Exception as e: return False, f"Lines Ex: {e}", logs
+            else:
+                return False, f"Line Item Error: {r2.text}", logs
+        except Exception as e:
+            return False, f"Lines Ex: {e}", logs
             
     return False, "Unknown Error", logs
 
