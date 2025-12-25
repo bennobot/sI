@@ -141,7 +141,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
-            
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = qty * price
@@ -156,17 +155,19 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Create Header (Advanced)
+    # 3. Create Header (Advanced Attempt)
     url_create = f"{get_cin7_base_url()}/purchase"
+    
     payload_header = {
         "SupplierID": supplier_id,
         "Location": location_choice,
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
         "Type": "Advanced",
-        "Approach": "Stock",
+        "Approach": "Stock", 
+        "BlindReceipt": False,
         "TaxRule": "20% (VAT on Expenses)",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
-        "Status": "DRAFT"
+        "Status": "DRAFT" 
     }
     
     task_id = None
@@ -180,27 +181,27 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     except Exception as e:
         return False, f"Header Ex: {e}", logs
 
-    # 4. Add Order Lines (WITH STATUS)
+    # 4. Add Order Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "DRAFT", # <--- ADDED HERE
+            "Status": "DRAFT", # <--- ADDED BACK
             "Lines": order_lines
         }
         
         try:
             r2 = requests.post(url_lines, headers=headers, json=payload_lines)
             if r2.status_code == 200:
-                return True, f"✅ Advanced PO Created! (ID: {task_id})", logs
+                return True, f"✅ PO Created! (ID: {task_id})", logs
             else:
                 return False, f"Line Item Error: {r2.text}", logs
         except Exception as e:
             return False, f"Lines Ex: {e}", logs
             
-    return False, "Unknown Error", logs
+    return False, "Unknown Flow Error", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
