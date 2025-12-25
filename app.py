@@ -141,6 +141,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
+            
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = qty * price
@@ -155,57 +156,44 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Create Header (TRYING SPECIFIC ADVANCED ENDPOINT)
-    # Note: If /purchase/advanced fails 404, we revert to /purchase but check payload
-    url_create = f"{get_cin7_base_url()}/purchase/advanced"
-    
-    payload_header = {
-        "SupplierID": supplier_id,
-        "Location": location_choice,
-        "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
-        "TaxRule": "20% (VAT on Expenses)",
-        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
-        "Status": "ORDERING", # Advanced purchases use ORDERING stage first
-        # Advanced Purchase usually requires at least one empty line to init if doing it in one go
-        # But here we just want the ID.
-    }
-    
-    # Fallback to standard /purchase if advanced endpoint implies a different structure
-    # Actually, standard /purchase with Type="Advanced" SHOULD work.
-    # Let's try to remove 'Approach' as that is for Simple purchases.
-    
+    # 3. Create Header (Force Advanced via Status)
     url_create = f"{get_cin7_base_url()}/purchase"
+    
     payload_header = {
         "SupplierID": supplier_id,
         "Location": location_choice,
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
-        "Type": "Advanced", # FORCE ADVANCED
+        "Type": "Advanced",  # Request Advanced
+        "Status": "ORDERING", # Force Advanced State (Simple POs don't have ORDERING)
         "TaxRule": "20% (VAT on Expenses)",
-        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
-        "Status": "DRAFT"
+        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', ''))
     }
-    
-    # REMOVED: "Approach": "Stock" (This triggers Simple Purchase logic!)
     
     task_id = None
     try:
+        logs.append(f"Sending Header Payload: {json.dumps(payload_header)}")
         r1 = requests.post(url_create, headers=headers, json=payload_header)
+        
         if r1.status_code == 200:
             task_id = r1.json().get('ID')
             logs.append(f"Step 1: Header Created (ID: {task_id})")
         else:
-            return False, f"Header Error: {r1.text}", logs
+            # STOP HERE if it fails
+            return False, f"Header Creation Failed: {r1.text}", logs
+            
     except Exception as e:
-        return False, f"Header Ex: {e}", logs
+        return False, f"Header Exception: {e}", logs
 
     # 4. Add Order Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
+        
+        # Note: /purchase/order endpoint might expect different status logic
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "DRAFT",
+            # We don't send Status here, we let it inherit 'ORDERING' from header
             "Lines": order_lines
         }
         
@@ -216,9 +204,9 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             else:
                 return False, f"Line Item Error: {r2.text}", logs
         except Exception as e:
-            return False, f"Lines Ex: {e}", logs
+            return False, f"Lines Exception: {e}", logs
             
-    return False, "Unknown Error", logs
+    return False, "Unknown Flow Error", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
