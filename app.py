@@ -138,32 +138,29 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     order_lines = []
     id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
     
-    total_before_tax = 0.0
-    
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
-            
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
-            line_total = qty * price
-            total_before_tax += line_total
+            total = qty * price
             
             order_lines.append({
                 "ProductID": prod_id, 
                 "Quantity": qty, 
                 "Price": price, 
-                "Total": line_total,
+                "Total": total, # Explicit Total
                 "TaxRule": "20% (VAT on Expenses)",
-                "Discount": 0
+                "Discount": 0,
+                "Tax": 0
             })
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Payload: ONE SHOT /advanced-purchase
-    url = f"{get_cin7_base_url()}/advanced-purchase"
+    # 3. Step A: Header (/advanced-purchase)
+    url_create = f"{get_cin7_base_url()}/advanced-purchase"
     
-    payload = {
+    payload_header = {
         "SupplierID": supplier_id,
         "Location": location_choice,
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
@@ -171,31 +168,44 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Approach": "Stock",
         "BlindReceipt": False,
         "PurchaseType": "Advanced",
-        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
-        "Note": "Streamlit Import",
-        
-        # NESTED ORDER OBJECT
-        "Order": {
-            "Status": "DRAFT", # Draft first to be safe
-            "Memo": "Auto-generated",
-            "Lines": order_lines,
-            "TotalBeforeTax": total_before_tax,
-            "Total": total_before_tax # Excluding tax for now
-        }
+        "Status": "ORDERING", # Advanced Header Status
+        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', ''))
     }
     
+    task_id = None
     try:
-        logs.append("Sending Advanced Payload with Order Lines...")
-        response = requests.post(url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            res_json = response.json()
-            return True, f"✅ Advanced PO Created! ID: {res_json.get('ID')}", logs
+        r1 = requests.post(url_create, headers=headers, json=payload_header)
+        if r1.status_code == 200:
+            task_id = r1.json().get('ID')
+            logs.append(f"Header Created: {task_id}")
         else:
-            return False, f"API Error {response.status_code}: {response.text}", logs
-            
+            return False, f"Header Failed: {r1.text}", logs
     except Exception as e:
-        return False, f"Exception: {str(e)}", logs
+        return False, f"Header Ex: {e}", logs
+
+    # 4. Step B: Lines (/purchase/order)
+    if task_id:
+        url_lines = f"{get_cin7_base_url()}/purchase/order"
+        
+        payload_lines = {
+            "TaskID": task_id,
+            "CombineAdditionalCharges": False,
+            "Memo": "Streamlit Import",
+            "Status": "DRAFT", # Trying Draft first so you can edit it. If fails, try AUTHORISED
+            "Lines": order_lines,
+            "AdditionalCharges": []
+        }
+        
+        try:
+            r2 = requests.post(url_lines, headers=headers, json=payload_lines)
+            if r2.status_code == 200:
+                return True, f"✅ Advanced PO Created! (ID: {task_id})", logs
+            else:
+                return False, f"Line Update Failed: {r2.text}", logs
+        except Exception as e:
+            return False, f"Line Update Ex: {e}", logs
+
+    return False, "Unknown Error", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
