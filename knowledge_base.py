@@ -109,7 +109,7 @@ GLOBAL_RULES_TEXT = f"""
 5. **FINANCIALS**: 
    - **Item_Price**: Price per PURCHASE UNIT.
    - **Landed Cost**: (Total Delivery / Total Units) + Item Price.
-   - **Discount**: Apply line item discounts.
+   - **Discount**: Apply line item discounts. In case of line discount, divide line total by number of units to find cost price per unit.
 
 6. **FILTERING**:
    - Exclude "pump clip", "badge" ONLY IF price is 0.00.
