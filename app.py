@@ -191,7 +191,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "DRAFT", # Trying Draft first so you can edit it. If fails, try AUTHORISED
+            "Status": "AUTHORISED", # Trying Draft first so you can edit it. If fails, try AUTHORISED
             "Lines": order_lines,
             "AdditionalCharges": []
         }
