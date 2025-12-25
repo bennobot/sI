@@ -123,7 +123,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if not headers: return False, "Cin7 Secrets missing.", []
     logs = []
     
-    # 1. Supplier
+    # 1. Supplier Setup
     supplier_id = None
     if 'Cin7_Supplier_ID' in header_df.columns and header_df.iloc[0]['Cin7_Supplier_ID']:
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
@@ -133,6 +133,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         if supplier_data: supplier_id = supplier_data['ID']
 
     if not supplier_id: return False, "Supplier not linked.", logs
+    logs.append(f"Using Supplier ID: {supplier_id}")
 
     # 2. Build Lines
     order_lines = []
@@ -140,7 +141,9 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
+        # Check if Shopify matched OR if we have a Cin7 ID manually
+        # Note: We rely on Cin7 ID being present
+        if pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = qty * price
@@ -149,15 +152,17 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
                 "ProductID": prod_id, 
                 "Quantity": qty, 
                 "Price": price, 
-                "Total": total, # Explicit Total
+                "Total": total,
                 "TaxRule": "20% (VAT on Expenses)",
                 "Discount": 0,
                 "Tax": 0
             })
+    
+    logs.append(f"Prepared {len(order_lines)} lines for export.")
 
-    if not order_lines: return False, "No valid lines.", logs
+    if not order_lines: return False, "No lines with valid Cin7 IDs found.", logs
 
-    # 3. Step A: Header (/advanced-purchase)
+    # 3. Step A: Create Header
     url_create = f"{get_cin7_base_url()}/advanced-purchase"
     
     payload_header = {
@@ -168,22 +173,26 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Approach": "Stock",
         "BlindReceipt": False,
         "PurchaseType": "Advanced",
-        "Status": "ORDERING", # Advanced Header Status
+        "Status": "ORDERING",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', ''))
     }
     
     task_id = None
     try:
+        logs.append(f"POST Header to {url_create}")
         r1 = requests.post(url_create, headers=headers, json=payload_header)
+        logs.append(f"Header Response Code: {r1.status_code}")
+        
         if r1.status_code == 200:
             task_id = r1.json().get('ID')
-            logs.append(f"Header Created: {task_id}")
+            logs.append(f"✅ Header Created: {task_id}")
         else:
-            return False, f"Header Failed: {r1.text}", logs
+            logs.append(f"❌ Header Failed: {r1.text}")
+            return False, f"Header Error: {r1.text}", logs
     except Exception as e:
         return False, f"Header Ex: {e}", logs
 
-    # 4. Step B: Lines (/purchase/order)
+    # 4. Step B: Add Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         
@@ -191,20 +200,27 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "AUTHORISED", # Trying Draft first so you can edit it. If fails, try AUTHORISED
+            "Status": "AUTHORISED", # Try AUTHORISED based on your Postman
             "Lines": order_lines,
             "AdditionalCharges": []
         }
         
         try:
+            logs.append(f"POST Lines to {url_lines}")
+            # logs.append(f"Payload: {json.dumps(payload_lines)}") # Uncomment to see full payload
+            
             r2 = requests.post(url_lines, headers=headers, json=payload_lines)
+            logs.append(f"Lines Response Code: {r2.status_code}")
+            
             if r2.status_code == 200:
-                return True, f"✅ Advanced PO Created! (ID: {task_id})", logs
+                logs.append(f"✅ Lines Added Successfully")
+                return True, f"PO {task_id} created with {len(order_lines)} lines.", logs
             else:
-                return False, f"Line Update Failed: {r2.text}", logs
+                logs.append(f"❌ Lines Failed: {r2.text}")
+                return False, f"Line Error: {r2.text}", logs
         except Exception as e:
-            return False, f"Line Update Ex: {e}", logs
-
+            return False, f"Lines Ex: {e}", logs
+            
     return False, "Unknown Error", logs
 
 # ==========================================
