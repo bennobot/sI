@@ -155,7 +155,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Create Header (TRYING BLIND RECEIPT FALSE)
+    # 3. Create Header (Advanced Attempt)
     url_create = f"{get_cin7_base_url()}/purchase"
     
     payload_header = {
@@ -164,7 +164,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
         "Type": "Advanced",
         "Approach": "Stock", 
-        "BlindReceipt": False, # <-- Explicitly disable Simple Mode
+        "BlindReceipt": False,
         "TaxRule": "20% (VAT on Expenses)",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
         "Status": "DRAFT" 
@@ -188,6 +188,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
+            "Status": "DRAFT", # <--- ADDED BACK
             "Lines": order_lines
         }
         
