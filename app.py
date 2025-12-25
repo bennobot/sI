@@ -132,26 +132,32 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         supplier_name = header_df.iloc[0]['Payable_To']
         supplier_data = get_cin7_supplier(supplier_name)
         if supplier_data: supplier_id = supplier_data['ID']
-        
+
     if not supplier_id: return False, "Supplier not linked.", logs
 
-    # 2. Build Lines
+    # 2. Build Lines (WITH TOTAL)
     order_lines = []
     id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
+            
+            qty = float(row.get('Quantity', 0))
+            price = float(row.get('Item_Price', 0))
+            total = qty * price # Net Total
+            
             order_lines.append({
                 "ProductID": prod_id, 
-                "Quantity": float(row.get('Quantity', 0)), 
-                "Price": float(row.get('Item_Price', 0)), 
+                "Quantity": qty, 
+                "Price": price, 
+                "Total": total, # <-- REQUIRED BY API
                 "TaxRule": "20% (VAT on Expenses)"
             })
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # --- STEP 1: CREATE HEADER (Advanced) ---
+    # 3. Create Header (Advanced)
     url_create = f"{get_cin7_base_url()}/purchase"
     payload_header = {
         "SupplierID": supplier_id,
@@ -174,14 +180,14 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     except Exception as e:
         return False, f"Header Ex: {e}", logs
 
-    # --- STEP 2: ADD ORDER LINES ---
+    # 4. Add Order Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
-            "Memo": f"Auto-generated via Streamlit",
-            "Status": "DRAFT",
+            "Memo": "Streamlit Import",
+            "Status": "ORDERING", # Or "AUTHORISED" if you want to lock it
             "Lines": order_lines
         }
         
