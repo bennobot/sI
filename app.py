@@ -44,6 +44,7 @@ st.title("Brewery Invoice Parser ⚡")
 # ==========================================
 # 1A. CIN7 CORE ENGINE
 # ==========================================
+
 def get_cin7_headers():
     if "cin7" not in st.secrets: return None
     creds = st.secrets["cin7"]
@@ -59,7 +60,6 @@ def get_cin7_base_url():
 
 @st.cache_data(ttl=3600) 
 def fetch_all_cin7_suppliers_cached():
-    """Fetches ALL suppliers from Cin7 using urllib."""
     if "cin7" not in st.secrets: return []
     creds = st.secrets["cin7"]
     headers = {
@@ -114,8 +114,7 @@ def get_cin7_supplier(name):
             if "Suppliers" in data and len(data["Suppliers"]) > 0:
                 return data["Suppliers"][0]
     except: pass
-    if "&" in name:
-        return get_cin7_supplier(name.replace("&", "and"))
+    if "&" in name: return get_cin7_supplier(name.replace("&", "and"))
     return None
 
 def create_cin7_purchase_order(header_df, lines_df, location_choice):
@@ -123,7 +122,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if not headers: return False, "Cin7 Secrets missing.", []
     logs = []
     
-    # 1. Supplier Setup
     supplier_id = None
     if 'Cin7_Supplier_ID' in header_df.columns and header_df.iloc[0]['Cin7_Supplier_ID']:
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
@@ -133,21 +131,16 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         if supplier_data: supplier_id = supplier_data['ID']
 
     if not supplier_id: return False, "Supplier not linked.", logs
-    logs.append(f"Using Supplier ID: {supplier_id}")
 
-    # 2. Build Lines
     order_lines = []
     id_col = 'Cin7_London_ID' if location_choice == 'London' else 'Cin7_Glou_ID'
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        # Check if Shopify matched OR if we have a Cin7 ID manually
-        # Note: We rely on Cin7 ID being present
-        if pd.notna(prod_id) and str(prod_id).strip():
+        if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = qty * price
-            
             order_lines.append({
                 "ProductID": prod_id, 
                 "Quantity": qty, 
@@ -157,14 +150,11 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
                 "Discount": 0,
                 "Tax": 0
             })
-    
-    logs.append(f"Prepared {len(order_lines)} lines for export.")
 
-    if not order_lines: return False, "No lines with valid Cin7 IDs found.", logs
+    if not order_lines: return False, "No valid lines found.", logs
 
-    # 3. Step A: Create Header
+    # Header
     url_create = f"{get_cin7_base_url()}/advanced-purchase"
-    
     payload_header = {
         "SupplierID": supplier_id,
         "Location": location_choice,
@@ -179,47 +169,29 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     task_id = None
     try:
-        logs.append(f"POST Header to {url_create}")
         r1 = requests.post(url_create, headers=headers, json=payload_header)
-        logs.append(f"Header Response Code: {r1.status_code}")
-        
         if r1.status_code == 200:
             task_id = r1.json().get('ID')
-            logs.append(f"✅ Header Created: {task_id}")
-        else:
-            logs.append(f"❌ Header Failed: {r1.text}")
-            return False, f"Header Error: {r1.text}", logs
-    except Exception as e:
-        return False, f"Header Ex: {e}", logs
+        else: return False, f"Header Error: {r1.text}", logs
+    except Exception as e: return False, f"Header Ex: {e}", logs
 
-    # 4. Step B: Add Lines
+    # Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
-        
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "AUTHORISED", # Try AUTHORISED based on your Postman
+            "Status": "AUTHORISED", 
             "Lines": order_lines,
             "AdditionalCharges": []
         }
-        
         try:
-            logs.append(f"POST Lines to {url_lines}")
-            # logs.append(f"Payload: {json.dumps(payload_lines)}") # Uncomment to see full payload
-            
             r2 = requests.post(url_lines, headers=headers, json=payload_lines)
-            logs.append(f"Lines Response Code: {r2.status_code}")
-            
             if r2.status_code == 200:
-                logs.append(f"✅ Lines Added Successfully")
-                return True, f"PO {task_id} created with {len(order_lines)} lines.", logs
-            else:
-                logs.append(f"❌ Lines Failed: {r2.text}")
-                return False, f"Line Error: {r2.text}", logs
-        except Exception as e:
-            return False, f"Lines Ex: {e}", logs
+                return True, f"✅ PO Created! ID: {task_id}", logs
+            else: return False, f"Line Error: {r2.text}", logs
+        except Exception as e: return False, f"Lines Ex: {e}", logs
             
     return False, "Unknown Error", logs
 
@@ -268,7 +240,8 @@ def normalize_vol_string(v_str):
     if not nums: return "0"
     val = float(nums[0])
     if "ml" in v_str: val = val / 10
-    return str(int(val))
+    if val.is_integer(): return str(int(val))
+    return str(val)
 
 def run_reconciliation_check(lines_df):
     if lines_df.empty: return lines_df, ["No Lines to check."]
@@ -434,6 +407,28 @@ def create_product_matrix(df):
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
 
+def reconstruct_lines_from_matrix(matrix_df):
+    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
+    new_lines = []
+    for _, row in matrix_df.iterrows():
+        base = {
+            'Supplier_Name': row.get('Supplier_Name', ''),
+            'Collaborator': row.get('Collaborator', ''),
+            'Product_Name': row.get('Product_Name', ''),
+            'ABV': row.get('ABV', '')
+        }
+        for i in range(1, 4):
+            fmt = row.get(f'Format{i}')
+            if pd.notna(fmt) and str(fmt).strip():
+                line = base.copy()
+                line['Format'] = fmt
+                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
+                line['Volume'] = row.get(f'Volume{i}', '')
+                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
+                line['Quantity'] = row.get(f'Quantity{i}', 0)
+                new_lines.append(line)
+    return pd.DataFrame(new_lines)
+
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
@@ -469,6 +464,7 @@ def download_file_from_drive(file_id):
 # 3. SESSION & SIDEBAR
 # ==========================================
 
+# Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
@@ -549,7 +545,9 @@ with tab_drive:
     else:
         st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
 
+# --- PROCESS BUTTON ---
 if st.button("🚀 Process Invoice", type="primary"):
+    
     if not uploaded_file and st.session_state.selected_drive_id:
         try:
             with st.status(f"Downloading {source_name}...", expanded=False) as status:
@@ -562,16 +560,21 @@ if st.button("🚀 Process Invoice", type="primary"):
     if target_stream and api_key:
         try:
             with st.status("Processing Document...", expanded=True) as status:
+                
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('models/gemini-2.5-flash')
-                st.write("1. Converting PDF to Images...")
+                
+                st.write("1. Converting PDF to Images (OCR Prep)...")
                 target_stream.seek(0)
                 images = convert_from_bytes(target_stream.read(), dpi=300)
+                
+                st.write(f"2. Extracting Text from {len(images)} pages...")
                 full_text = ""
-                for img in images:
+                for i, img in enumerate(images):
+                    st.write(f"   - Scanning page {i+1}...")
                     full_text += pytesseract.image_to_string(img) + "\n"
 
-                st.write("3. Sending to AI...")
+                st.write("3. Sending Text to AI Model...")
                 injected = f"\n!!! USER OVERRIDE !!!\n{custom_rule}\n" if custom_rule else ""
 
                 prompt = f"""
@@ -596,8 +599,10 @@ if st.button("🚀 Process Invoice", type="primary"):
                 INVOICE TEXT:
                 {full_text}
                 """
+
                 response = model.generate_content(prompt)
                 
+                st.write("4. Parsing Response...")
                 try:
                     json_text = response.text.strip().replace("```json", "").replace("```", "")
                     data = json.loads(json_text)
@@ -606,19 +611,26 @@ if st.button("🚀 Process Invoice", type="primary"):
                     st.stop()
                 
                 st.write("5. Finalizing Data...")
+                
                 st.session_state.header_data = pd.DataFrame([data['header']])
+                
+                # Init Cin7 columns
                 st.session_state.header_data['Cin7_Supplier_ID'] = ""
                 st.session_state.header_data['Cin7_Supplier_Name'] = ""
                 
                 df_lines = pd.DataFrame(data['line_items'])
+                
                 df_lines = clean_product_names(df_lines)
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
-                
+
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
+                
+                # Clear Logs
                 st.session_state.shopify_logs = []
+                st.session_state.cin7_supplier_list = []
                 st.session_state.matrix_data = None
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
@@ -635,6 +647,10 @@ if st.button("🚀 Process Invoice", type="primary"):
 if st.session_state.header_data is not None:
     if custom_rule:
         st.success("✅ Used Custom Rules")
+        try: sup = st.session_state.header_data.iloc[0]['Payable_To']
+        except: sup = "Unknown"
+        with st.expander("📩 Developer Snippet"):
+            st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
     
@@ -656,8 +672,9 @@ if st.session_state.header_data is not None:
     
     # --- TAB 1: LINE ITEMS ---
     with current_tabs[0]:
-        st.subheader("1. Review & Reconciliation")
+        st.subheader("1. Review & Edit Lines")
         
+        # PREPARE DISPLAY
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
             display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
@@ -680,7 +697,14 @@ if st.session_state.header_data is not None:
             "Matched_Variant": st.column_config.TextColumn("Variant Match", disabled=True),
         }
 
-        edited_lines = st.data_editor(display_df, num_rows="dynamic", width=1000, key="line_editor", column_config=column_config)
+        # EDIT
+        edited_lines = st.data_editor(
+            display_df, 
+            num_rows="dynamic", 
+            width=1000,
+            key="line_editor",
+            column_config=column_config
+        )
         
         if edited_lines is not None:
             saved_df = edited_lines.copy()
@@ -706,94 +730,91 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: PRODUCTS TO UPLOAD ---
+    # --- TAB 2: MISSING PRODUCTS ---
     if not all_matched:
         with current_tabs[1]:
             st.subheader("2. Products to Create in Shopify")
             st.warning(f"You have {unmatched_count} unmatched items.")
+            
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
                 for i in range(1, 4):
                     column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create?", default=False)
-                edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000, column_config=column_config)
+
+                edited_matrix = st.data_editor(
+                    st.session_state.matrix_data, 
+                    num_rows="dynamic", 
+                    width=1000,
+                    column_config=column_config
+                )
                 st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
 
-   # --- TAB 3: HEADER ---
-    with t3:
-        st.subheader("Invoice Header")
-        
-        current_payee = "Unknown"
-        if not st.session_state.header_data.empty:
-             current_payee = st.session_state.header_data.iloc[0]['Payable_To']
-        
-        cin7_list_names = [s['Name'] for s in st.session_state.cin7_all_suppliers]
-        
-        default_index = 0
-        if cin7_list_names and current_payee:
-            match, score = process.extractOne(current_payee, cin7_list_names)
-            if score > 60:
-                try: default_index = cin7_list_names.index(match)
-                except ValueError: default_index = 0
-
-        col_h1, col_h2 = st.columns([1, 2])
-        with col_h1:
-            selected_supplier = st.selectbox(
-                "Matched Cin7 Supplier:", 
-                options=cin7_list_names,
-                index=default_index,
-                key="header_supplier_select",
-                help="Click 'Fetch Cin7 Suppliers' in sidebar first if this is empty."
-            )
+    # --- TAB 3: HEADER / EXPORT ---
+    if all_matched:
+        with current_tabs[1]:
+            st.subheader("3. Finalize & Export")
+            st.success("✅ All products matched! Ready for export.")
             
-            if selected_supplier and not st.session_state.header_data.empty:
-                supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
-                if supp_data:
-                    st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
-                    st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
-        
-        with col_h2:
-            st.write("") 
+            current_payee = "Unknown"
             if not st.session_state.header_data.empty:
-                st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', 'N/A')}")
+                 current_payee = st.session_state.header_data.iloc[0]['Payable_To']
+            
+            cin7_list_names = [s['Name'] for s in st.session_state.cin7_all_suppliers]
+            default_index = 0
+            if cin7_list_names and current_payee:
+                match, score = process.extractOne(current_payee, cin7_list_names)
+                if score > 60:
+                    try: default_index = cin7_list_names.index(match)
+                    except ValueError: default_index = 0
 
-        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
-        st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
-        
-        st.divider()
-        st.subheader("🚀 Export Purchase Order")
-        
-        po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
-        
-        if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
-            if "cin7" in st.secrets:
-                with st.spinner("Creating Purchase Order..."):
-                    success, msg, logs = create_cin7_purchase_order(
-                        st.session_state.header_data, 
-                        st.session_state.line_items, 
-                        po_location
-                    )
-                    st.session_state.cin7_logs = logs
-                    
-                    if success:
-                        # Extract Task ID from msg or logs if possible, 
-                        # but create_cin7_purchase_order returns it in the msg string currently.
-                        # Ideally, we parse it out.
-                        try:
-                            # Msg format: "✅ PO Created! (ID: uuid-uuid...)"
+            col_h1, col_h2 = st.columns([1, 2])
+            with col_h1:
+                selected_supplier = st.selectbox(
+                    "Cin7 Supplier Link:", 
+                    options=cin7_list_names,
+                    index=default_index,
+                    key="header_supplier_select",
+                    help="Click 'Fetch Cin7 Suppliers' in sidebar if empty."
+                )
+                
+                if selected_supplier and not st.session_state.header_data.empty:
+                    supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
+                    if supp_data:
+                        st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
+                        st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
+            
+            with col_h2:
+                st.write("") 
+                if not st.session_state.header_data.empty:
+                    st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', 'N/A')}")
+
+            edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
+            
+            st.divider()
+            
+            po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
+            
+            if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
+                if "cin7" in st.secrets:
+                    with st.spinner("Creating Purchase Order..."):
+                        success, msg, logs = create_cin7_purchase_order(
+                            st.session_state.header_data, 
+                            st.session_state.line_items, 
+                            po_location
+                        )
+                        if success:
+                            # Extract Task ID to build link
+                            task_id = None
                             match = re.search(r'ID: ([a-f0-9\-]+)', msg)
-                            if match:
-                                task_id = match.group(1)
-                                link = f"https://inventory.dearsystems.com/PurchaseAdvanced#{task_id}"
-                                st.success(msg)
-                                st.link_button("🔗 Open PO in Cin7", link)
-                                st.balloons()
-                            else:
-                                st.success(msg)
-                        except:
+                            if match: task_id = match.group(1)
+                            
                             st.success(msg)
-                    else:
-                        st.error(msg)
-                        with st.expander("Error Details"):
-                            for log in logs: st.write(log)
-            else:
-                st.error("Cin7 Secrets missing.")
+                            if task_id:
+                                st.link_button("🔗 Open PO in Cin7", f"https://inventory.dearsystems.com/PurchaseAdvanced#{task_id}")
+                            st.balloons()
+                        else:
+                            st.error(msg)
+                            with st.expander("Error Details"):
+                                for log in logs: st.write(log)
+                else:
+                    st.error("Cin7 Secrets missing.")
