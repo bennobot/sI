@@ -718,48 +718,82 @@ if st.session_state.header_data is not None:
                 edited_matrix = st.data_editor(st.session_state.matrix_data, num_rows="dynamic", width=1000, column_config=column_config)
                 st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
 
-    # --- TAB 3: HEADER / EXPORT ---
-    if all_matched:
-        with current_tabs[1]:
-            st.subheader("3. Finalize & Export")
-            st.success("✅ All products matched! Ready for export.")
+   # --- TAB 3: HEADER ---
+    with t3:
+        st.subheader("Invoice Header")
+        
+        current_payee = "Unknown"
+        if not st.session_state.header_data.empty:
+             current_payee = st.session_state.header_data.iloc[0]['Payable_To']
+        
+        cin7_list_names = [s['Name'] for s in st.session_state.cin7_all_suppliers]
+        
+        default_index = 0
+        if cin7_list_names and current_payee:
+            match, score = process.extractOne(current_payee, cin7_list_names)
+            if score > 60:
+                try: default_index = cin7_list_names.index(match)
+                except ValueError: default_index = 0
+
+        col_h1, col_h2 = st.columns([1, 2])
+        with col_h1:
+            selected_supplier = st.selectbox(
+                "Matched Cin7 Supplier:", 
+                options=cin7_list_names,
+                index=default_index,
+                key="header_supplier_select",
+                help="Click 'Fetch Cin7 Suppliers' in sidebar first if this is empty."
+            )
             
-            current_payee = "Unknown"
+            if selected_supplier and not st.session_state.header_data.empty:
+                supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
+                if supp_data:
+                    st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
+                    st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
+        
+        with col_h2:
+            st.write("") 
             if not st.session_state.header_data.empty:
-                 current_payee = st.session_state.header_data.iloc[0]['Payable_To']
-            
-            cin7_list_names = [s['Name'] for s in st.session_state.cin7_all_suppliers]
-            default_index = 0
-            if cin7_list_names and current_payee:
-                match, score = process.extractOne(current_payee, cin7_list_names)
-                if score > 60:
-                    try: default_index = cin7_list_names.index(match)
-                    except ValueError: default_index = 0
+                st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', 'N/A')}")
 
-            col_h1, col_h2 = st.columns([1, 2])
-            with col_h1:
-                selected_supplier = st.selectbox("Cin7 Supplier Link:", options=cin7_list_names, index=default_index)
-                if selected_supplier and not st.session_state.header_data.empty:
-                    supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
-                    if supp_data:
-                        st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
-                        st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
-
-            edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
-            st.divider()
-            
-            po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
-            
-            if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
-                if "cin7" in st.secrets:
-                    with st.spinner("Creating Purchase Order..."):
-                        success, msg, logs = create_cin7_purchase_order(st.session_state.header_data, st.session_state.line_items, po_location)
-                        if success:
+        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
+        st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
+        
+        st.divider()
+        st.subheader("🚀 Export Purchase Order")
+        
+        po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
+        
+        if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
+            if "cin7" in st.secrets:
+                with st.spinner("Creating Purchase Order..."):
+                    success, msg, logs = create_cin7_purchase_order(
+                        st.session_state.header_data, 
+                        st.session_state.line_items, 
+                        po_location
+                    )
+                    st.session_state.cin7_logs = logs
+                    
+                    if success:
+                        # Extract Task ID from msg or logs if possible, 
+                        # but create_cin7_purchase_order returns it in the msg string currently.
+                        # Ideally, we parse it out.
+                        try:
+                            # Msg format: "✅ PO Created! (ID: uuid-uuid...)"
+                            match = re.search(r'ID: ([a-f0-9\-]+)', msg)
+                            if match:
+                                task_id = match.group(1)
+                                link = f"https://inventory.dearsystems.com/PurchaseAdvanced#{task_id}"
+                                st.success(msg)
+                                st.link_button("🔗 Open PO in Cin7", link)
+                                st.balloons()
+                            else:
+                                st.success(msg)
+                        except:
                             st.success(msg)
-                            st.balloons()
-                        else:
-                            st.error(msg)
-                            with st.expander("Error Details"):
-                                for log in logs: st.write(log)
-                else:
-                    st.error("Cin7 Secrets missing.")
+                    else:
+                        st.error(msg)
+                        with st.expander("Error Details"):
+                            for log in logs: st.write(log)
+            else:
+                st.error("Cin7 Secrets missing.")
