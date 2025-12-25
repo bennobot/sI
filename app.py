@@ -123,7 +123,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     if not headers: return False, "Cin7 Secrets missing.", []
     logs = []
     
-    # 1. Supplier
+    # 1. Supplier Setup (Same as before)
     supplier_id = None
     if 'Cin7_Supplier_ID' in header_df.columns and header_df.iloc[0]['Cin7_Supplier_ID']:
         supplier_id = header_df.iloc[0]['Cin7_Supplier_ID']
@@ -155,53 +155,36 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Create Header (FORCE ADVANCED ENDPOINT)
-    # This endpoint does NOT require 'Approach' because Advanced implies Stock first.
-    url_create = f"{get_cin7_base_url()}/purchase/advanced"
+    # 3. Payload: ONE SHOT ATTEMPT
+    url = f"{get_cin7_base_url()}/purchase"
     
-    payload_header = {
+    payload = {
         "SupplierID": supplier_id,
         "Location": location_choice,
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
+        "Type": "Advanced",         # Request Advanced
+        "Approach": "Stock",        # Satisfy Validator
+        "Status": "ORDERING",       # Force Ordering Stage
         "TaxRule": "20% (VAT on Expenses)",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
-        "Status": "ORDERING"
-    }
-    
-    task_id = None
-    try:
-        logs.append(f"POST {url_create}")
-        r1 = requests.post(url_create, headers=headers, json=payload_header)
-        
-        if r1.status_code == 200:
-            task_id = r1.json().get('ID')
-            logs.append(f"Step 1: Header Created (ID: {task_id})")
-        else:
-            return False, f"Advanced Header Failed: {r1.text}", logs
-            
-    except Exception as e:
-        return False, f"Header Exception: {e}", logs
-
-    # 4. Add Order Lines
-    if task_id:
-        url_lines = f"{get_cin7_base_url()}/purchase/order"
-        payload_lines = {
-            "TaskID": task_id,
-            "CombineAdditionalCharges": False,
-            "Memo": "Streamlit Import",
+        # Nest the lines here to see if it accepts them directly for Advanced
+        "Order": {
             "Lines": order_lines
         }
+    }
+    
+    try:
+        logs.append("Sending Hybrid Payload...")
+        response = requests.post(url, headers=headers, json=payload)
         
-        try:
-            r2 = requests.post(url_lines, headers=headers, json=payload_lines)
-            if r2.status_code == 200:
-                return True, f"✅ Advanced PO Created! (ID: {task_id})", logs
-            else:
-                return False, f"Line Item Error: {r2.text}", logs
-        except Exception as e:
-            return False, f"Lines Exception: {e}", logs
+        if response.status_code == 200:
+            res_json = response.json()
+            return True, f"PO Created! ID: {res_json.get('ID')}", logs
+        else:
+            return False, f"API Error: {response.text}", logs
             
-    return False, "Unknown Flow Error", logs
+    except Exception as e:
+        return False, f"Exception: {e}", logs
 
 # ==========================================
 # 1B. SHOPIFY ENGINE
