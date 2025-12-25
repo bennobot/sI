@@ -141,7 +141,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
         if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
-            
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = qty * price
@@ -156,18 +155,37 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines.", logs
 
-    # 3. Create Header (Advanced)
+    # 3. Create Header (TRYING SPECIFIC ADVANCED ENDPOINT)
+    # Note: If /purchase/advanced fails 404, we revert to /purchase but check payload
+    url_create = f"{get_cin7_base_url()}/purchase/advanced"
+    
+    payload_header = {
+        "SupplierID": supplier_id,
+        "Location": location_choice,
+        "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
+        "TaxRule": "20% (VAT on Expenses)",
+        "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
+        "Status": "ORDERING", # Advanced purchases use ORDERING stage first
+        # Advanced Purchase usually requires at least one empty line to init if doing it in one go
+        # But here we just want the ID.
+    }
+    
+    # Fallback to standard /purchase if advanced endpoint implies a different structure
+    # Actually, standard /purchase with Type="Advanced" SHOULD work.
+    # Let's try to remove 'Approach' as that is for Simple purchases.
+    
     url_create = f"{get_cin7_base_url()}/purchase"
     payload_header = {
         "SupplierID": supplier_id,
         "Location": location_choice,
         "Date": pd.to_datetime('today').strftime('%Y-%m-%d'),
-        "Type": "Advanced",
-        "Approach": "Stock",
+        "Type": "Advanced", # FORCE ADVANCED
         "TaxRule": "20% (VAT on Expenses)",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', '')),
         "Status": "DRAFT"
     }
+    
+    # REMOVED: "Approach": "Stock" (This triggers Simple Purchase logic!)
     
     task_id = None
     try:
@@ -180,14 +198,14 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     except Exception as e:
         return False, f"Header Ex: {e}", logs
 
-    # 4. Add Order Lines (WITH STATUS)
+    # 4. Add Order Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         payload_lines = {
             "TaskID": task_id,
             "CombineAdditionalCharges": False,
             "Memo": "Streamlit Import",
-            "Status": "DRAFT", # <--- ADDED HERE
+            "Status": "DRAFT",
             "Lines": order_lines
         }
         
