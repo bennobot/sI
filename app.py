@@ -166,6 +166,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         "Type": "Advanced",  # Request Advanced
         "Status": "ORDERING", # Force Advanced State (Simple POs don't have ORDERING)
         "TaxRule": "20% (VAT on Expenses)",
+        "Approach": "STOCK",
         "SupplierInvoiceNumber": str(header_df.iloc[0].get('Invoice_Number', ''))
     }
     
