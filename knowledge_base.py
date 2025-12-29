@@ -126,6 +126,15 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "Lakedown Brewing Company LLP": """
+   for Lakedown Brewing Company LLP the vendor is Lakedown Brewing Co. for the products.
+
+   The product name is within apostrophes - this the rest needs disregarding - unless no apostrophes exist then use the full string
+
+   If the product name contains Marquee - that is the product name - disregard the information within the apostrophes!
+   """,
+
+   
    "Anspach & Hobday": """
    check the product name carefully
    the pack size is in the product name for cans
