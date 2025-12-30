@@ -126,6 +126,14 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "Pig & Porter": """
+   For Pig And Porter Limited the Supplier_Name is always Pig & Porter
+
+   Product Skylarking Session Ipa is just called Skylarking
+
+   Product Got The Face On Tropical Pale is just called Got The Face On
+   """,
+   
    "Crafty AF Ltd": """
    For Craft AF Ltd the supplier_name for the products is always Below Brew Co
    """,
