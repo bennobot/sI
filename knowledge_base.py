@@ -158,6 +158,13 @@ SUPPLIER_RULEBOOK = {
    
    "The Beak Brewery Limited": """
    the abv and style is at the end of the product name - this needs removing
+   the data is set out in the following order
+   Quantity, Product_Name, Unit Price, Line Discount (Amount) / Line Discount (Percentage), VAT (Tax), Line total price
+
+   for example
+   QTY ITEM UNIT PRICE DISCOUNT VAT LINE PRICE is as follows
+   3 Aloft 5% DDH pale - 30L SS £135.00 £16.875 / 12.5% 20% £354.38
+   
    IMPORTANT The item price is is the line price divided by the quantity - calculate the item price this way
    firkin is always 9 Gallon for volume
    """,
