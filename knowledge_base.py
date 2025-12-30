@@ -131,6 +131,12 @@ SUPPLIER_RULEBOOK = {
 
    The product format is the last part of each product name, this needs removing e.g. Green Mountain AF Ekeg should be Green Mountain AF and Wild Swan Ecask should be Wild Swan
 
+   when the product name includes ECask the format is cask - be careful to check all the lines on the invoice, sometimes there are products with the same name but different formats
+   e.g Jaipur keg and jaipur Ecask 
+   sometimes the qty, ord (quantity) is more than 1 digit e.g 18
+   for example
+   18.0000 0.0000 18.0000B/JAIP-ECA09-059 Jaipur Ecask - 5.9% ABV 9 Gallon 97.00 ECask 1,746.00
+
    The products Pale Rider and Easy Rider should have the Supplier_Name Kelham Island Brewery
    """,
    
