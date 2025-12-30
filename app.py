@@ -664,7 +664,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 5. DISPLAY
+# 5. DISPLAY & WORKFLOW LOGIC
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -682,27 +682,16 @@ if st.session_state.header_data is not None:
     if 'Shopify_Status' in df.columns:
         unmatched_count = len(df[df['Shopify_Status'] != "✅ Matched"])
     else:
-        unmatched_count = len(df) # Assume all unmatched if not checked
+        unmatched_count = len(df) # Assume dirty start
 
     all_matched = (unmatched_count == 0) and ('Shopify_Status' in df.columns)
 
-    # 2. DEFINE TABS
-    tabs = ["📝 Line Items (Work Area)"]
-    if not all_matched:
-        tabs.append("⚠️ Products To Upload")
-    
-    # Only show Export tab if matched
-    if all_matched:
-        tabs.append("🚀 Finalize & Export PO")
-    else:
-        # Optional: Show a disabled tab or just hide it
-        pass 
-        
-    current_tabs = st.tabs(tabs)
+    # 2. RENDER 3 STATIC TABS
+    t1, t2, t3 = st.tabs(["📝 1. Line Items", "⚠️ 2. Resolve Missing", "🚀 3. Finalize PO"])
     
     # --- TAB 1: LINE ITEMS ---
-    with current_tabs[0]:
-        st.subheader("1. Review & Edit Lines")
+    with t1:
+        st.subheader("Review & Reconciliation")
         
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
@@ -714,6 +703,7 @@ if st.session_state.header_data is not None:
             'Volume', 'Quantity', 'Item_Price', 'Collaborator', 
             'Shopify_Variant_ID', 'London_SKU', 'Gloucester_SKU'
         ]
+        
         final_cols = [c for c in ideal_order if c in display_df.columns]
         rem = [c for c in display_df.columns if c not in final_cols]
         final_cols.extend(rem)
@@ -743,7 +733,7 @@ if st.session_state.header_data is not None:
         col1, col2 = st.columns([1, 4])
         with col1:
             if "shopify" in st.secrets:
-                if st.button("🛒 Check Inventory & Generate Report"):
+                if st.button("🛒 Check Inventory", type="primary"):
                     with st.spinner("Checking..."):
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
@@ -753,17 +743,19 @@ if st.session_state.header_data is not None:
                         st.rerun()
         
         with col2:
-             st.download_button("📥 Download Lines CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
+             st.download_button("📥 Download CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
     # --- TAB 2: MISSING PRODUCTS ---
-    if not all_matched:
-        with current_tabs[1]:
-            st.subheader("2. Products to Create in Shopify")
-            st.warning(f"You have {unmatched_count} unmatched items. Resolve them in Shopify, then click 'Check Inventory' again.")
+    with t2:
+        if all_matched:
+            st.success("🎉 No missing products! You can skip this tab.")
+        else:
+            st.subheader("Create New Products")
+            st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
             
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
@@ -779,15 +771,15 @@ if st.session_state.header_data is not None:
                 st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
 
     # --- TAB 3: HEADER / EXPORT ---
-    if all_matched:
-        # Note: If we added 3 tabs above, this is index 1. If we added 2 tabs, it's index 1.
-        # But wait, if all_matched is True, 'Products To Upload' tab is skipped.
-        # So 'Finalize' becomes index 1.
-        
-        with current_tabs[1]: 
+    with t3:
+        if not all_matched:
+            st.error("🔒 **LOCKED**: Please resolve all unmatched items in Tab 2 before exporting.")
+            st.info(f"Remaining Issues: {unmatched_count}")
+        else:
             st.subheader("3. Finalize & Export")
-            st.success("✅ All products matched! Ready for export.")
+            st.success("✅ Ready for Export")
             
+            # --- SUPPLIER LINK LOGIC ---
             current_payee = "Unknown"
             if not st.session_state.header_data.empty:
                  current_payee = st.session_state.header_data.iloc[0]['Payable_To']
@@ -805,8 +797,7 @@ if st.session_state.header_data is not None:
                 selected_supplier = st.selectbox(
                     "Cin7 Supplier Link:", 
                     options=cin7_list_names,
-                    index=default_index,
-                    key="header_supplier_select"
+                    index=default_index
                 )
                 if selected_supplier and not st.session_state.header_data.empty:
                     supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
@@ -818,6 +809,7 @@ if st.session_state.header_data is not None:
             
             st.divider()
             
+            # --- EXPORT BUTTON ---
             po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
             
             if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
