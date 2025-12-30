@@ -365,4 +365,500 @@ def run_reconciliation_check(lines_df):
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
-                    v_sku = str(variant.get('sku',
+                    v_sku = str(variant.get('sku', '')).strip()
+                    
+                    pack_ok = False
+                    if inv_pack == "1":
+                        if " x " not in v_title: pack_ok = True
+                    else:
+                        if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                    
+                    vol_ok = False
+                    if inv_vol in v_title: vol_ok = True
+                    if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    if inv_vol == "9" and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
+                    if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
+                    if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
+                    
+                    if pack_ok and vol_ok:
+                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
+                        status = "✅ Matched"
+                        match_found = True
+                        
+                        full_title = prod['title']
+                        matched_prod_name = full_title[2:] if full_title.startswith("L-") or full_title.startswith("G-") else full_title
+                        matched_var_name = variant['title']
+                        if prod.get('featuredImage'): img_url = prod['featuredImage']['url']
+                        
+                        if v_sku and len(v_sku) > 2:
+                            base_sku = v_sku[2:]
+                            london_sku = f"L-{base_sku}"
+                            glou_sku = f"G-{base_sku}"
+                        break
+                if match_found: break
+            if not match_found: status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+        
+        if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
+        if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
+
+        row['Shopify_Status'] = status
+        row['Matched_Product'] = matched_prod_name
+        row['Matched_Variant'] = matched_var_name
+        row['Image'] = img_url
+        row['London_SKU'] = london_sku
+        row['Cin7_London_ID'] = cin7_l_id
+        row['Gloucester_SKU'] = glou_sku
+        row['Cin7_Glou_ID'] = cin7_g_id
+        results.append(row)
+    
+    return pd.DataFrame(results), logs
+
+# ==========================================
+# 2. DATA FUNCTIONS
+# ==========================================
+
+def get_master_supplier_list():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(worksheet="MasterData", ttl=600)
+        return df['Supplier_Master'].dropna().astype(str).tolist()
+    except: return []
+
+def normalize_supplier_names(df, master_list):
+    if df is None or df.empty or not master_list: return df
+    def match_name(name):
+        if not isinstance(name, str): return name
+        match, score = process.extractOne(name, master_list)
+        return match if score >= 88 else name
+    if 'Supplier_Name' in df.columns:
+        df['Supplier_Name'] = df['Supplier_Name'].apply(match_name)
+    return df
+
+def clean_product_names(df):
+    if df is None or df.empty: return df
+    def cleaner(name):
+        if not isinstance(name, str): return name
+        name = name.replace('|', '')
+        name = re.sub(r'\b\d+x\d+cl\b', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\b\d+g\b', '', name, flags=re.IGNORECASE)
+        return ' '.join(name.split())
+    if 'Product_Name' in df.columns:
+        df['Product_Name'] = df['Product_Name'].apply(cleaner)
+    return df
+
+def create_product_matrix(df):
+    if df is None or df.empty: return pd.DataFrame()
+    df = df.fillna("")
+    if 'Shopify_Status' in df.columns:
+        df = df[df['Shopify_Status'] != "✅ Matched"]
+    if df.empty: return pd.DataFrame()
+
+    group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    grouped = df.groupby(group_cols, sort=False)
+    matrix_rows = []
+    
+    for name, group in grouped:
+        row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
+        for i, (_, item) in enumerate(group.iterrows()):
+            if i >= 3: break
+            suffix = str(i + 1)
+            row[f'Format{suffix}'] = item['Format']
+            row[f'Pack_Size{suffix}'] = item['Pack_Size']
+            row[f'Volume{suffix}'] = item['Volume']
+            row[f'Item_Price{suffix}'] = item['Item_Price']
+            row[f'Create{suffix}'] = False 
+        matrix_rows.append(row)
+        
+    matrix_df = pd.DataFrame(matrix_rows)
+    base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    format_cols = []
+    for i in range(1, 4):
+        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
+    final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
+    return matrix_df[final_cols]
+
+def reconstruct_lines_from_matrix(matrix_df):
+    if matrix_df is None or matrix_df.empty: return pd.DataFrame()
+    new_lines = []
+    for _, row in matrix_df.iterrows():
+        base = {
+            'Supplier_Name': row.get('Supplier_Name', ''),
+            'Collaborator': row.get('Collaborator', ''),
+            'Product_Name': row.get('Product_Name', ''),
+            'ABV': row.get('ABV', '')
+        }
+        for i in range(1, 4):
+            fmt = row.get(f'Format{i}')
+            if pd.notna(fmt) and str(fmt).strip():
+                line = base.copy()
+                line['Format'] = fmt
+                line['Pack_Size'] = row.get(f'Pack_Size{i}', '')
+                line['Volume'] = row.get(f'Volume{i}', '')
+                line['Item_Price'] = row.get(f'Item_Price{i}', 0.0)
+                line['Quantity'] = row.get(f'Quantity{i}', 0)
+                new_lines.append(line)
+    return pd.DataFrame(new_lines)
+
+# --- GOOGLE DRIVE HELPERS ---
+def get_drive_service():
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        creds_dict = st.secrets["connections"]["gsheets"]
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        return build('drive', 'v3', credentials=creds)
+    return None
+
+def list_files_in_folder(folder_id):
+    service = get_drive_service()
+    if not service: return []
+    query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+    results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
+    files = results.get('files', [])
+    files.sort(key=lambda x: x['name'].lower())
+    return files
+
+def download_file_from_drive(file_id):
+    service = get_drive_service()
+    if not service: return None
+    request = service.files().get_media(fileId=file_id)
+    file_stream = io.BytesIO()
+    downloader = MediaIoBaseDownload(file_stream, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    file_stream.seek(0)
+    return file_stream
+
+# ==========================================
+# 3. SESSION & SIDEBAR
+# ==========================================
+
+# Initialize Session State
+if 'header_data' not in st.session_state: st.session_state.header_data = None
+if 'line_items' not in st.session_state: st.session_state.line_items = None
+if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
+if 'checker_data' not in st.session_state: st.session_state.checker_data = None
+if 'master_suppliers' not in st.session_state: st.session_state.master_suppliers = get_master_supplier_list()
+if 'drive_files' not in st.session_state: st.session_state.drive_files = []
+if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
+if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
+if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
+if 'cin7_all_suppliers' not in st.session_state: st.session_state.cin7_all_suppliers = fetch_all_cin7_suppliers_cached()
+
+with st.sidebar:
+    st.header("Settings")
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+        st.success("API Key Loaded 🔑")
+    else:
+        api_key = st.text_input("Enter API Key", type="password")
+
+    st.info("Logic loaded from `knowledge_base.py`")
+    
+    st.divider()
+    st.subheader("📂 Google Drive")
+    folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
+    
+    if st.button("🔍 Scan Folder"):
+        if folder_id:
+            try:
+                with st.spinner("Scanning..."):
+                    files = list_files_in_folder(folder_id)
+                    st.session_state.drive_files = files
+                if files:
+                    st.success(f"Found {len(files)} PDFs!")
+                else:
+                    st.warning("No PDFs found or Access Denied.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+    
+    st.divider()
+    
+    st.subheader("🧪 The Lab")
+    with st.form("teaching_form"):
+        st.caption("Test a new rule here. Press Ctrl+Enter to apply.")
+        custom_rule = st.text_area("Inject Temporary Rule:", height=100)
+        st.form_submit_button("Set Rule")
+
+    st.divider()
+    if st.button("Log Out"):
+        st.session_state.password_correct = False
+        st.rerun()
+
+# ==========================================
+# 4. MAIN LOGIC (SOURCE SELECTION)
+# ==========================================
+
+st.subheader("1. Select Invoice Source")
+tab_upload, tab_drive = st.tabs(["⬆️ Manual Upload", "☁️ Google Drive"])
+
+target_stream = None
+source_name = "Unknown"
+
+with tab_upload:
+    uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
+    if uploaded_file:
+        target_stream = uploaded_file
+        source_name = uploaded_file.name
+
+with tab_drive:
+    if st.session_state.drive_files:
+        file_names = [f['name'] for f in st.session_state.drive_files]
+        selected_name = st.selectbox("Select Invoice from Drive List:", options=file_names, index=None, placeholder="Choose a file...")
+        if selected_name:
+            file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
+            st.session_state.selected_drive_id = file_data['id']
+            st.session_state.selected_drive_name = file_data['name']
+            
+            if not uploaded_file:
+                source_name = selected_name
+    else:
+        st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
+
+# --- PROCESS BUTTON ---
+if st.button("🚀 Process Invoice", type="primary"):
+    
+    if not uploaded_file and st.session_state.selected_drive_id:
+        try:
+            with st.status(f"Downloading {source_name}...", expanded=False) as status:
+                target_stream = download_file_from_drive(st.session_state.selected_drive_id)
+                status.update(label="Download Complete", state="complete")
+        except Exception as e:
+            st.error(f"Download Failed: {e}")
+            st.stop()
+
+    if target_stream and api_key:
+        try:
+            with st.status("Processing Document...", expanded=True) as status:
+                
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('models/gemini-2.5-flash')
+                
+                st.write("1. Converting PDF to Images (OCR Prep)...")
+                target_stream.seek(0)
+                images = convert_from_bytes(target_stream.read(), dpi=300)
+                
+                st.write(f"2. Extracting Text from {len(images)} pages...")
+                full_text = ""
+                for i, img in enumerate(images):
+                    st.write(f"   - Scanning page {i+1}...")
+                    full_text += pytesseract.image_to_string(img) + "\n"
+
+                st.write("3. Sending Text to AI Model...")
+                injected = f"\n!!! USER OVERRIDE !!!\n{custom_rule}\n" if custom_rule else ""
+
+                prompt = f"""
+                Extract invoice data to JSON.
+                STRUCTURE:
+                {{
+                    "header": {{
+                        "Payable_To": "Supplier Name", "Invoice_Number": "...", "Issue_Date": "...", 
+                        "Payment_Terms": "...", "Due_Date": "...", "Total_Net": 0.00, 
+                        "Total_VAT": 0.00, "Total_Gross": 0.00, "Total_Discount_Amount": 0.00, "Shipping_Charge": 0.00
+                    }},
+                    "line_items": [
+                        {{
+                            "Supplier_Name": "...", "Collaborator": "...", "Product_Name": "...", "ABV": "...", 
+                            "Format": "...", "Pack_Size": "...", "Volume": "...", "Quantity": 1, "Item_Price": 10.00
+                        }}
+                    ]
+                }}
+                SUPPLIER RULEBOOK: {json.dumps(SUPPLIER_RULEBOOK)}
+                GLOBAL RULES: {GLOBAL_RULES_TEXT}
+                {injected}
+                INVOICE TEXT:
+                {full_text}
+                """
+
+                response = model.generate_content(prompt)
+                
+                st.write("4. Parsing Response...")
+                try:
+                    json_text = response.text.strip().replace("```json", "").replace("```", "")
+                    data = json.loads(json_text)
+                except Exception as e:
+                    st.error(f"AI returned invalid JSON: {response.text}")
+                    st.stop()
+                
+                st.write("5. Finalizing Data...")
+                
+                st.session_state.header_data = pd.DataFrame([data['header']])
+                
+                # Init Cin7 columns
+                st.session_state.header_data['Cin7_Supplier_ID'] = ""
+                st.session_state.header_data['Cin7_Supplier_Name'] = ""
+                
+                df_lines = pd.DataFrame(data['line_items'])
+                
+                df_lines = clean_product_names(df_lines)
+                if st.session_state.master_suppliers:
+                    df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
+
+                # Initialize columns so Matrix generation doesn't fail on first run
+                df_lines['Shopify_Status'] = "Pending"
+                cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
+                existing = [c for c in cols if c in df_lines.columns]
+                st.session_state.line_items = df_lines[existing]
+                
+                # Clear Logs
+                st.session_state.shopify_logs = []
+                st.session_state.cin7_logs = []
+                st.session_state.matrix_data = None
+                
+                status.update(label="Processing Complete!", state="complete", expanded=False)
+
+        except Exception as e:
+            st.error(f"Critical Error: {e}")
+    else:
+        st.warning("Please upload a file or select one from Google Drive first.")
+
+# ==========================================
+# 5. DISPLAY
+# ==========================================
+
+if st.session_state.header_data is not None:
+    if custom_rule:
+        st.success("✅ Used Custom Rules")
+        try: sup = st.session_state.header_data.iloc[0]['Payable_To']
+        except: sup = "Unknown"
+        with st.expander("📩 Developer Snippet"):
+            st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
+
+    st.divider()
+    t1, t2, t3 = st.tabs(["📝 Line Items (Work Area)", "📊 Missing Products Report", "📄 Invoice Header"])
+    
+    # --- TAB 1: LINE ITEMS ---
+    with t1:
+        st.subheader("1. Review & Edit Lines")
+        
+        # EDIT FIRST (Sync State)
+        edited_lines = st.data_editor(
+            st.session_state.line_items, 
+            num_rows="dynamic", 
+            width=1000,
+            key="line_editor"
+        )
+        st.session_state.line_items = edited_lines
+
+        # ACTIONS
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if "shopify" in st.secrets:
+                if st.button("🛒 Check Inventory & Generate Report"):
+                    with st.spinner("Checking..."):
+                        updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
+                        st.session_state.line_items = updated_lines
+                        st.session_state.shopify_logs = logs
+                        
+                        # Generate Matrix
+                        st.session_state.matrix_data = create_product_matrix(updated_lines)
+                        
+                        st.success("Check Complete!")
+                        st.rerun()
+        
+        with col2:
+             st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
+        
+        if st.session_state.shopify_logs:
+            with st.expander("🕵️ Debug Logs", expanded=False):
+                st.markdown("\n".join(st.session_state.shopify_logs))
+
+    # --- TAB 2: MISSING PRODUCTS ---
+    with t2:
+        st.subheader("2. Products to Create in Shopify")
+        st.info("Check the boxes as you create these products.")
+        
+        if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
+            column_config = {}
+            for i in range(1, 4):
+                column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create {i}?", default=False)
+
+            edited_matrix = st.data_editor(
+                st.session_state.matrix_data, 
+                num_rows="dynamic", 
+                width=1000,
+                column_config=column_config
+            )
+            st.download_button("📥 Download To-Do List CSV", edited_matrix.to_csv(index=False), "missing_products.csv")
+        elif st.session_state.matrix_data is not None:
+            st.success("🎉 All products matched! Nothing to create.")
+        else:
+            st.warning("Run 'Check Inventory' in Tab 1 to generate this report.")
+
+    # --- TAB 3: HEADER ---
+    with t3:
+        st.subheader("Invoice Header")
+        
+        # 1. Get current payee
+        current_payee = "Unknown"
+        if not st.session_state.header_data.empty:
+             current_payee = st.session_state.header_data.iloc[0]['Payable_To']
+        
+        # 2. Get Cin7 List (From Cache)
+        cin7_list_names = [s['Name'] for s in st.session_state.cin7_all_suppliers]
+        
+        # 3. Calculate Default Index
+        default_index = 0
+        if cin7_list_names and current_payee:
+            match, score = process.extractOne(current_payee, cin7_list_names)
+            if score > 60:
+                try: default_index = cin7_list_names.index(match)
+                except ValueError: default_index = 0
+
+        # 4. Show Dropdown
+        col_h1, col_h2 = st.columns([1, 2])
+        with col_h1:
+            selected_supplier = st.selectbox(
+                "Matched Cin7 Supplier:", 
+                options=cin7_list_names,
+                index=default_index,
+                key="header_supplier_select",
+                help="Click 'Fetch Cin7 Suppliers' in sidebar first if this is empty."
+            )
+            
+            # Update Header Data on selection
+            if selected_supplier and not st.session_state.header_data.empty:
+                supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
+                if supp_data:
+                    st.session_state.header_data.at[0, 'Cin7_Supplier_ID'] = supp_data['ID']
+                    st.session_state.header_data.at[0, 'Cin7_Supplier_Name'] = supp_data['Name']
+        
+        with col_h2:
+            st.write("") # Spacer
+            if not st.session_state.header_data.empty:
+                st.caption(f"ID: {st.session_state.header_data.iloc[0].get('Cin7_Supplier_ID', 'N/A')}")
+
+        edited_header = st.data_editor(st.session_state.header_data, num_rows="fixed", width=1000)
+        st.download_button("📥 Download Header CSV", edited_header.to_csv(index=False), "header.csv")
+        
+        st.divider()
+        
+        po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
+        
+        if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
+            if "cin7" in st.secrets:
+                with st.spinner("Creating Purchase Order..."):
+                    success, msg, logs = create_cin7_purchase_order(
+                        st.session_state.header_data, 
+                        st.session_state.line_items, 
+                        po_location
+                    )
+                    st.session_state.cin7_logs = logs
+                    
+                    if success:
+                        task_id = None
+                        match = re.search(r'ID: ([a-f0-9\-]+)', msg)
+                        if match: task_id = match.group(1)
+                        
+                        st.success(msg)
+                        if task_id:
+                            st.link_button("🔗 Open PO in Cin7", f"https://inventory.dearsystems.com/PurchaseAdvanced#{task_id}")
+                        st.balloons()
+                    else:
+                        st.error(msg)
+                        with st.expander("Error Details"):
+                            for log in logs: st.write(log)
+            else:
+                st.error("Cin7 Secrets missing.")
