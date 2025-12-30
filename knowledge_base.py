@@ -126,6 +126,10 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "UnBarred Brewery": """
+   For Unbarred Brewery when the product name has Cask - at the beginning remove this from the product name
+   """,
+   
    "Pig & Porter": """
    For Pig And Porter Limited the Supplier_Name is always Pig & Porter
 
