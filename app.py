@@ -271,6 +271,7 @@ def run_reconciliation_check(lines_df):
     logs = []
     df = lines_df.copy()
     
+    # Init Columns
     df['Shopify_Status'] = "Pending"
     df['Matched_Product'] = ""
     df['Matched_Variant'] = "" 
@@ -300,13 +301,16 @@ def run_reconciliation_check(lines_df):
         
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
-        inv_fmt = str(row.get('Format', '')).lower()
         
         raw_pack = str(row.get('Pack_Size', '')).strip()
-        inv_pack = "1" if raw_pack.lower() in ['none', 'nan', '', '0'] else raw_pack.replace('.0', '')
+        if raw_pack.lower() in ['none', 'nan', '', '0']:
+            inv_pack = "1"
+        else:
+            inv_pack = raw_pack.replace('.0', '')
+            
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         
-        logs.append(f"Checking: **{inv_prod_name}** ({inv_fmt} / {inv_pack}x {inv_vol})")
+        logs.append(f"Checking: **{inv_prod_name}** (Pack:{inv_pack} Vol:{inv_vol})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
@@ -315,8 +319,6 @@ def run_reconciliation_check(lines_df):
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
-                
-                # Logic: Parse L-Supplier / Product Name
                 shop_prod_name_clean = shop_title_full
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
@@ -324,48 +326,18 @@ def run_reconciliation_check(lines_df):
                 
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
-                if score > 40: scored_candidates.append((score, prod, shop_prod_name_clean))
+                if score > 40: scored_candidates.append((score, prod))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
             match_found = False
             
-            for score, prod, clean_name in scored_candidates:
+            for score, prod in scored_candidates:
                 if score < 75: continue 
                 
-                # --- STRICT FORMAT CHECK ---
-                shop_fmt_meta = prod.get('format_meta', {}).get('value', '') or ""
-                shop_keg_meta = prod.get('keg_meta', {}).get('value', '') or ""
-                shop_title_lower = prod['title'].lower()
-                
-                # Combine all format info from Shopify
-                shop_format_str = f"{shop_fmt_meta} {shop_keg_meta} {shop_title_lower}".lower()
-                
-                is_compatible = True
-                
-                # Rule 1: Steel Keg vs KeyKeg/PolyKeg
-                if "steel" in inv_fmt:
-                    if "keykeg" in shop_format_str or "poly" in shop_format_str or "dolium" in shop_format_str:
-                        is_compatible = False
-                
-                # Rule 2: KeyKeg vs Steel
-                elif "keykeg" in inv_fmt:
-                    if "steel" in shop_format_str or "stainless" in shop_format_str:
-                        is_compatible = False
-                        
-                # Rule 3: Cask vs Keg
-                elif "cask" in inv_fmt or "firkin" in inv_fmt:
-                    if "keg" in shop_format_str and "cask" not in shop_format_str:
-                        is_compatible = False
-
-                if not is_compatible:
-                    # logs.append(f"   Skipping `{prod['title']}` - Format Conflict.")
-                    continue
-                
-                # --- VARIANT CHECK ---
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
-                    v_sku = str(variant.get('sku', '')).strip()
+                    v_sku = str(variant.get('sku', '')).strip()  # FIXED LINE
                     
                     pack_ok = False
                     if inv_pack == "1":
@@ -387,17 +359,25 @@ def run_reconciliation_check(lines_df):
                         match_found = True
                         
                         full_title = prod['title']
-                        matched_prod_name = full_title[2:] if full_title.startswith("L-") or full_title.startswith("G-") else full_title
+                        if full_title.startswith("L-") or full_title.startswith("G-"):
+                            matched_prod_name = full_title[2:]
+                        else:
+                            matched_prod_name = full_title
+                            
                         matched_var_name = variant['title']
-                        if prod.get('featuredImage'): img_url = prod['featuredImage']['url']
+                        if prod.get('featuredImage'):
+                            img_url = prod['featuredImage']['url']
                         
                         if v_sku and len(v_sku) > 2:
                             base_sku = v_sku[2:]
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
                         break
+                
                 if match_found: break
-            if not match_found: status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+            
+            if not match_found: 
+                status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
