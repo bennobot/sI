@@ -126,6 +126,14 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "Thornbridge Brewery": """
+   when the product name includes ekeg it is a steel keg, when it includes keg it is a Keykeg
+
+   The product format is the last part of each product name, this needs removing e.g. Green Mountain AF Ekeg should be Green Mountain AF and Wild Swan Ecask should be Wild Swan
+
+   The products Pale Rider and Easy Rider should have the Supplier_Name Kelham Island Brewery
+   """,
+   
    "UnBarred Brewery": """
    For Unbarred Brewery when the product name has Cask - at the beginning remove this from the product name
    """,
