@@ -158,7 +158,7 @@ SUPPLIER_RULEBOOK = {
    
    "The Beak Brewery Limited": """
    the abv and style is at the end of the product name - this needs removing
-   The item price is is the line price divided by the quantity
+   IMPORTANT The item price is is the line price divided by the quantity - calculate the item price this way
    firkin is always 9 Gallon for volume
    """,
    
