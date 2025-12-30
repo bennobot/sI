@@ -131,7 +131,7 @@ SUPPLIER_RULEBOOK = {
    """,
       
    "Lakedown Brewing Company LLP": """
-   for Lakedown Brewing Company LLP the vendor is Lakedown Brewing Co. for the products.
+   for Lakedown Brewing Company LLP the supplier_name for the products is Lakedown Brewing Co.
 
    The product name is within apostrophes - this the rest needs disregarding - unless no apostrophes exist then use the full string
 
