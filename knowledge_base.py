@@ -126,6 +126,10 @@ VALID FORMATS LIST:
 # ==========================================
 SUPPLIER_RULEBOOK = {
 
+   "Crafty AF Ltd": """
+   For Craft AF Ltd the supplier_name for the products is always Below Brew Co
+   """,
+      
    "Lakedown Brewing Company LLP": """
    for Lakedown Brewing Company LLP the vendor is Lakedown Brewing Co. for the products.
 
