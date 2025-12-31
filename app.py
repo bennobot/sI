@@ -791,24 +791,27 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-  # --- TAB 2: MISSING PRODUCTS ---
+ # --- TAB 2: MISSING PRODUCTS ---
     with t2:
         st.subheader("2. Products to Create in Shopify")
-        st.info("Check the boxes as you create these products.")
         
-        # REMOVED SECRET CHECK FOR DEBUGGING
-        if st.button("🍺 Search Untappd for Missing Items"):
-             if "untappd" in st.secrets:
-                 with st.spinner("Searching Untappd..."):
-                     st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
-                     st.success("Search Complete!")
-                     st.rerun()
-             else:
-                 st.error("Untappd Secrets Missing in TOML")
-
-        # ... (Rest of table display) ...
-        
+        # Show button if matrix exists (regardless of match status)
         if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
+            
+            col_u1, col_u2 = st.columns([3, 1])
+            with col_u1:
+                st.info("Check the boxes as you create these products.")
+            with col_u2:
+                # FORCE BUTTON VISIBILITY
+                if st.button("🍺 Search Untappd Details"):
+                    if "untappd" in st.secrets:
+                        with st.spinner("Searching Untappd..."):
+                             st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
+                             st.success("Search Complete!")
+                             st.rerun()
+                    else:
+                        st.error("Untappd Secrets Missing")
+            
             column_config = {}
             for i in range(1, 4):
                 column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create?", default=False)
@@ -820,10 +823,11 @@ if st.session_state.header_data is not None:
                 column_config=column_config
             )
             st.download_button("📥 Download To-Do List CSV", edited_matrix.to_csv(index=False), "missing_products.csv")
+            
         elif st.session_state.matrix_data is not None:
-            st.success("🎉 All products matched! Nothing to create.")
+             st.success("🎉 All products matched! Nothing to create.")
         else:
-            st.warning("Run 'Check Inventory' in Tab 1 to generate this report.")
+             st.warning("Run 'Check Inventory' in Tab 1 to generate this report.")
 
     # --- TAB 3: HEADER ---
     with t3:
