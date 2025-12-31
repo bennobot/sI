@@ -110,10 +110,7 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                
-                # --- CHANGE 1: Use label_image_thumb instead of default_image ---
-                row['Untappd_Image'] = res['label_image_thumb'] 
-                
+                row['Untappd_Image'] = res['default_image']
                 row['Label_Img'] = res['label_image']
                 row['Label_HD'] = res['label_image_hd']
                 row['Label_Thumb'] = res['label_image_thumb']
@@ -825,10 +822,7 @@ if st.session_state.header_data is not None:
                 
                 # REORDER FOR UNTAPPD VISIBILITY
                 disp_matrix = st.session_state.matrix_data.copy()
-                
-                # --- CHANGE 2: Added 'Untappd_Desc' after ABV ---
-                u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
-                
+                u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV']
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
                 rest = [c for c in disp_matrix.columns if c not in u_cols and c not in base_cols]
                 
