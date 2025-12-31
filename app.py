@@ -41,23 +41,20 @@ if not check_password(): st.stop()
 
 st.title("Brewery Invoice Parser ⚡")
 
-# =========================================================
-# 1. CRITICAL FUNCTIONS (MUST BE DEFINED BEFORE SIDEBAR)
-# =========================================================
+# ==========================================
+# 1. GOOGLE DRIVE FUNCTIONS (Restored)
+# ==========================================
+# Placed here so they exist before the sidebar calls them
 
-# --- 1A. GOOGLE DRIVE FUNCTIONS ---
 def get_drive_service():
-    if "gcp_service_account" not in st.secrets: return None
-    try:
-        creds_dict = st.secrets["gcp_service_account"]
+    # Matches your specific secrets structure
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        creds_dict = st.secrets["connections"]["gsheets"]
         creds = service_account.Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/drive.readonly']
+            creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
         return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"Auth Error: {e}")
-        return None
+    return None
 
 def list_files_in_folder(folder_id):
     service = get_drive_service()
@@ -71,20 +68,20 @@ def list_files_in_folder(folder_id):
 def download_file_from_drive(file_id):
     service = get_drive_service()
     if not service: return None
-    try:
-        request = service.files().get_media(fileId=file_id)
-        file_stream = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_stream, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        file_stream.seek(0)
-        return file_stream
-    except Exception as e:
-        st.error(f"Download Error: {e}")
-        return None
+    request = service.files().get_media(fileId=file_id)
+    file_stream = io.BytesIO()
+    downloader = MediaIoBaseDownload(file_stream, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    file_stream.seek(0)
+    return file_stream
 
-# --- 1B. UNTAPPD FUNCTIONS ---
+# ==========================================
+# 2. OTHER API FUNCTIONS
+# ==========================================
+
+# --- 2A. UNTAPPD ---
 def search_untappd_item(supplier, product):
     if "untappd" not in st.secrets: return None
     creds = st.secrets["untappd"]
@@ -110,7 +107,7 @@ def search_untappd_item(supplier, product):
                     "brewery": best.get("brewery"),
                     "abv": best.get("abv"),
                     "description": best.get("description"),
-                    "label_image_thumb": best.get("label_image_thumb"), # Specific request for thumb
+                    "label_image_thumb": best.get("label_image_thumb"),
                     "brewery_location": best.get("brewery_location")
                 }
     except: pass
@@ -119,7 +116,7 @@ def search_untappd_item(supplier, product):
 def batch_untappd_lookup(matrix_df):
     if matrix_df.empty: return matrix_df, ["Matrix Empty"]
     
-    # Define columns to ensure they exist
+    # Define columns
     cols = ['Untappd_Status', 'Untappd_ID', 'Untappd_Brewery', 'Untappd_Product', 
             'Untappd_ABV', 'Untappd_Desc', 'Label_Thumb', 'Brewery_Loc']
     
@@ -134,7 +131,6 @@ def batch_untappd_lookup(matrix_df):
         prog_bar.progress((idx + 1) / len(matrix_df))
         
         current_id = str(row.get('Untappd_ID', '')).strip()
-        # Search if ID is missing or empty
         if not current_id or current_id == 'nan':
             res = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
             if res:
@@ -145,7 +141,6 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                # Map thumbnail to Label_Thumb column
                 row['Label_Thumb'] = res['label_image_thumb']
                 row['Brewery_Loc'] = res['brewery_location']
             else:
@@ -156,7 +151,7 @@ def batch_untappd_lookup(matrix_df):
         
     return pd.DataFrame(updated_rows), logs
 
-# --- 1C. CIN7 FUNCTIONS ---
+# --- 2B. CIN7 ---
 def get_cin7_headers():
     if "cin7" not in st.secrets: return None
     creds = st.secrets["cin7"]
@@ -306,7 +301,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             
     return False, "Unknown Error", logs
 
-# --- 1D. SHOPIFY FUNCTIONS ---
+# --- 2C. SHOPIFY ---
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
@@ -473,7 +468,7 @@ def run_reconciliation_check(lines_df):
     
     return pd.DataFrame(results), logs
 
-# --- 1E. DATA & MATRIX FUNCTIONS ---
+# --- 2D. DATA & MATRIX ---
 def get_master_supplier_list():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -534,8 +529,9 @@ def create_product_matrix(df):
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
 
+
 # ==========================================
-# 2. SESSION & SIDEBAR (AFTER FUNCTIONS)
+# 3. SESSION & SIDEBAR
 # ==========================================
 
 # Initialize Session State
@@ -573,6 +569,7 @@ with st.sidebar:
         if folder_id:
             try:
                 with st.spinner("Scanning..."):
+                    # This function is now defined above, so it will work
                     files = list_files_in_folder(folder_id)
                     st.session_state.drive_files = files
                 if files:
@@ -596,7 +593,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 3. MAIN LOGIC
+# 4. MAIN LOGIC
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -725,7 +722,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 4. DISPLAY
+# 5. DISPLAY UI
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -842,12 +839,7 @@ if st.session_state.header_data is not None:
                 disp_matrix = st.session_state.matrix_data.copy()
                 
                 # --- CHANGE: STRICT COLUMN ORDERING ---
-                # 1. Untappd Status
-                # 2. Label Thumb
-                # 3. Brewery
-                # 4. Product
-                # 5. ABV
-                # 6. Description
+                # Untappd_Status Label_Thumb Untappd_Brewery Untappd_Product Untappd_ABV Untappd_Desc
                 
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
