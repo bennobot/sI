@@ -41,9 +41,9 @@ if not check_password(): st.stop()
 
 st.title("Brewery Invoice Parser ⚡")
 
-# ==========================================
-# 1. FUNCTION DEFINITIONS (MUST BE FIRST)
-# ==========================================
+# =========================================================
+# 1. CRITICAL FUNCTIONS (MUST BE DEFINED BEFORE SIDEBAR)
+# =========================================================
 
 # --- 1A. GOOGLE DRIVE FUNCTIONS ---
 def get_drive_service():
@@ -112,7 +112,7 @@ def search_untappd_item(supplier, product):
                     "brewery": best.get("brewery"),
                     "abv": best.get("abv"),
                     "description": best.get("description"),
-                    "label_image_thumb": best.get("label_image_thumb"), # Specifically getting thumb
+                    "label_image_thumb": best.get("label_image_thumb"), # Specific request for thumb
                     "brewery_location": best.get("brewery_location")
                 }
     except: pass
@@ -121,7 +121,7 @@ def search_untappd_item(supplier, product):
 def batch_untappd_lookup(matrix_df):
     if matrix_df.empty: return matrix_df, ["Matrix Empty"]
     
-    # Init columns
+    # Define columns to ensure they exist
     cols = ['Untappd_Status', 'Untappd_ID', 'Untappd_Brewery', 'Untappd_Product', 
             'Untappd_ABV', 'Untappd_Desc', 'Label_Thumb', 'Brewery_Loc']
     
@@ -136,6 +136,7 @@ def batch_untappd_lookup(matrix_df):
         prog_bar.progress((idx + 1) / len(matrix_df))
         
         current_id = str(row.get('Untappd_ID', '')).strip()
+        # Search if ID is missing or empty
         if not current_id or current_id == 'nan':
             res = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
             if res:
@@ -146,7 +147,7 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                # POPULATE THUMBNAIL HERE
+                # Map thumbnail to Label_Thumb column
                 row['Label_Thumb'] = res['label_image_thumb']
                 row['Brewery_Loc'] = res['brewery_location']
             else:
@@ -535,7 +536,6 @@ def create_product_matrix(df):
     final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
     return matrix_df[final_cols]
 
-
 # ==========================================
 # 2. SESSION & SIDEBAR (AFTER FUNCTIONS)
 # ==========================================
@@ -575,7 +575,6 @@ with st.sidebar:
         if folder_id:
             try:
                 with st.spinner("Scanning..."):
-                    # list_files_in_folder is now guaranteed to be defined
                     files = list_files_in_folder(folder_id)
                     st.session_state.drive_files = files
                 if files:
@@ -844,7 +843,14 @@ if st.session_state.header_data is not None:
                 
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # --- EXACT COLUMN ORDER REQUESTED ---
+                # --- CHANGE: STRICT COLUMN ORDERING ---
+                # 1. Untappd Status
+                # 2. Label Thumb
+                # 3. Brewery
+                # 4. Product
+                # 5. ABV
+                # 6. Description
+                
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
