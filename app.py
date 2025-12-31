@@ -42,14 +42,12 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. HELPER FUNCTIONS (API & DATA)
+# 1. FUNCTION DEFINITIONS (MUST BE FIRST)
 # ==========================================
 
 # --- 1A. GOOGLE DRIVE FUNCTIONS ---
 def get_drive_service():
-    if "gcp_service_account" not in st.secrets:
-        # Fail silently in UI until needed, or check logs
-        return None
+    if "gcp_service_account" not in st.secrets: return None
     try:
         creds_dict = st.secrets["gcp_service_account"]
         creds = service_account.Credentials.from_service_account_info(
@@ -88,70 +86,7 @@ def download_file_from_drive(file_id):
         st.error(f"Download Error: {e}")
         return None
 
-# --- 1B. DATA & MATRIX FUNCTIONS ---
-
-def get_master_supplier_list():
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="MasterData", ttl=600)
-        return df['Supplier_Master'].dropna().astype(str).tolist()
-    except: return []
-
-def normalize_supplier_names(df, master_list):
-    if df is None or df.empty or not master_list: return df
-    def match_name(name):
-        if not isinstance(name, str): return name
-        match, score = process.extractOne(name, master_list)
-        return match if score >= 88 else name
-    if 'Supplier_Name' in df.columns:
-        df['Supplier_Name'] = df['Supplier_Name'].apply(match_name)
-    return df
-
-def clean_product_names(df):
-    if df is None or df.empty: return df
-    def cleaner(name):
-        if not isinstance(name, str): return name
-        name = name.replace('|', '')
-        name = re.sub(r'\b\d+x\d+cl\b', '', name, flags=re.IGNORECASE)
-        name = re.sub(r'\b\d+g\b', '', name, flags=re.IGNORECASE)
-        return ' '.join(name.split())
-    if 'Product_Name' in df.columns:
-        df['Product_Name'] = df['Product_Name'].apply(cleaner)
-    return df
-
-def create_product_matrix(df):
-    if df is None or df.empty: return pd.DataFrame()
-    df = df.fillna("")
-    if 'Shopify_Status' in df.columns:
-        df = df[df['Shopify_Status'] != "✅ Matched"]
-    if df.empty: return pd.DataFrame()
-
-    group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
-    grouped = df.groupby(group_cols, sort=False)
-    matrix_rows = []
-    
-    for name, group in grouped:
-        row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
-        for i, (_, item) in enumerate(group.iterrows()):
-            if i >= 3: break
-            suffix = str(i + 1)
-            row[f'Format{suffix}'] = item['Format']
-            row[f'Pack_Size{suffix}'] = item['Pack_Size']
-            row[f'Volume{suffix}'] = item['Volume']
-            row[f'Item_Price{suffix}'] = item['Item_Price']
-            row[f'Create{suffix}'] = False 
-        matrix_rows.append(row)
-        
-    matrix_df = pd.DataFrame(matrix_rows)
-    base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
-    format_cols = []
-    for i in range(1, 4):
-        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
-    final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
-    return matrix_df[final_cols]
-
-# --- 1C. UNTAPPD ENGINE ---
-
+# --- 1B. UNTAPPD FUNCTIONS ---
 def search_untappd_item(supplier, product):
     if "untappd" not in st.secrets: return None
     creds = st.secrets["untappd"]
@@ -171,17 +106,13 @@ def search_untappd_item(supplier, product):
             items = data.get('items', [])
             if items:
                 best = items[0] 
-                # Extract fields
                 return {
                     "untappd_id": best.get("untappd_id"),
                     "name": best.get("name"),
                     "brewery": best.get("brewery"),
                     "abv": best.get("abv"),
                     "description": best.get("description"),
-                    "default_image": best.get("default_image"),
-                    "label_image": best.get("label_image"),
-                    "label_image_hd": best.get("label_image_hd"),
-                    "label_image_thumb": best.get("label_image_thumb"),
+                    "label_image_thumb": best.get("label_image_thumb"), # Specifically getting thumb
                     "brewery_location": best.get("brewery_location")
                 }
     except: pass
@@ -192,8 +123,7 @@ def batch_untappd_lookup(matrix_df):
     
     # Init columns
     cols = ['Untappd_Status', 'Untappd_ID', 'Untappd_Brewery', 'Untappd_Product', 
-            'Untappd_ABV', 'Untappd_Desc', 'Untappd_Image', 
-            'Label_Img', 'Label_HD', 'Label_Thumb', 'Brewery_Loc']
+            'Untappd_ABV', 'Untappd_Desc', 'Label_Thumb', 'Brewery_Loc']
     
     for c in cols:
         if c not in matrix_df.columns: matrix_df[c] = ""
@@ -205,7 +135,6 @@ def batch_untappd_lookup(matrix_df):
     for idx, row in matrix_df.iterrows():
         prog_bar.progress((idx + 1) / len(matrix_df))
         
-        # Only search if ID missing
         current_id = str(row.get('Untappd_ID', '')).strip()
         if not current_id or current_id == 'nan':
             res = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
@@ -217,11 +146,7 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                # Populating the display column with the thumbnail
-                row['Untappd_Image'] = res['label_image_thumb']
-                # Backing up data
-                row['Label_Img'] = res['label_image']
-                row['Label_HD'] = res['label_image_hd']
+                # POPULATE THUMBNAIL HERE
                 row['Label_Thumb'] = res['label_image_thumb']
                 row['Brewery_Loc'] = res['brewery_location']
             else:
@@ -232,8 +157,7 @@ def batch_untappd_lookup(matrix_df):
         
     return pd.DataFrame(updated_rows), logs
 
-# --- 1D. CIN7 & SHOPIFY ---
-
+# --- 1C. CIN7 FUNCTIONS ---
 def get_cin7_headers():
     if "cin7" not in st.secrets: return None
     creds = st.secrets["cin7"]
@@ -343,7 +267,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
     if not order_lines: return False, "No valid lines found.", logs
 
-    # Header
     url_create = f"{get_cin7_base_url()}/advanced-purchase"
     payload_header = {
         "SupplierID": supplier_id,
@@ -365,7 +288,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
         else: return False, f"Header Error: {r1.text}", logs
     except Exception as e: return False, f"Header Ex: {e}", logs
 
-    # Lines
     if task_id:
         url_lines = f"{get_cin7_base_url()}/purchase/order"
         payload_lines = {
@@ -385,6 +307,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             
     return False, "Unknown Error", logs
 
+# --- 1D. SHOPIFY FUNCTIONS ---
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
@@ -551,8 +474,70 @@ def run_reconciliation_check(lines_df):
     
     return pd.DataFrame(results), logs
 
+# --- 1E. DATA & MATRIX FUNCTIONS ---
+def get_master_supplier_list():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(worksheet="MasterData", ttl=600)
+        return df['Supplier_Master'].dropna().astype(str).tolist()
+    except: return []
+
+def normalize_supplier_names(df, master_list):
+    if df is None or df.empty or not master_list: return df
+    def match_name(name):
+        if not isinstance(name, str): return name
+        match, score = process.extractOne(name, master_list)
+        return match if score >= 88 else name
+    if 'Supplier_Name' in df.columns:
+        df['Supplier_Name'] = df['Supplier_Name'].apply(match_name)
+    return df
+
+def clean_product_names(df):
+    if df is None or df.empty: return df
+    def cleaner(name):
+        if not isinstance(name, str): return name
+        name = name.replace('|', '')
+        name = re.sub(r'\b\d+x\d+cl\b', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\b\d+g\b', '', name, flags=re.IGNORECASE)
+        return ' '.join(name.split())
+    if 'Product_Name' in df.columns:
+        df['Product_Name'] = df['Product_Name'].apply(cleaner)
+    return df
+
+def create_product_matrix(df):
+    if df is None or df.empty: return pd.DataFrame()
+    df = df.fillna("")
+    if 'Shopify_Status' in df.columns:
+        df = df[df['Shopify_Status'] != "✅ Matched"]
+    if df.empty: return pd.DataFrame()
+
+    group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    grouped = df.groupby(group_cols, sort=False)
+    matrix_rows = []
+    
+    for name, group in grouped:
+        row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
+        for i, (_, item) in enumerate(group.iterrows()):
+            if i >= 3: break
+            suffix = str(i + 1)
+            row[f'Format{suffix}'] = item['Format']
+            row[f'Pack_Size{suffix}'] = item['Pack_Size']
+            row[f'Volume{suffix}'] = item['Volume']
+            row[f'Item_Price{suffix}'] = item['Item_Price']
+            row[f'Create{suffix}'] = False 
+        matrix_rows.append(row)
+        
+    matrix_df = pd.DataFrame(matrix_rows)
+    base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    format_cols = []
+    for i in range(1, 4):
+        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
+    final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
+    return matrix_df[final_cols]
+
+
 # ==========================================
-# 2. SESSION & SIDEBAR
+# 2. SESSION & SIDEBAR (AFTER FUNCTIONS)
 # ==========================================
 
 # Initialize Session State
@@ -590,6 +575,7 @@ with st.sidebar:
         if folder_id:
             try:
                 with st.spinner("Scanning..."):
+                    # list_files_in_folder is now guaranteed to be defined
                     files = list_files_in_folder(folder_id)
                     st.session_state.drive_files = files
                 if files:
@@ -613,7 +599,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 3. MAIN LOGIC (SOURCE SELECTION)
+# 3. MAIN LOGIC
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -791,16 +777,14 @@ if st.session_state.header_data is not None:
             "Matched_Variant": st.column_config.TextColumn("Variant Match", disabled=True),
         }
 
-        # EDIT FIRST (Use Key for persistence)
         edited_lines = st.data_editor(
             display_df, 
             num_rows="dynamic", 
             width=1000,
-            key=f"line_editor_{st.session_state.line_items_key}", # Dynamic key forces refresh on new load
+            key=f"line_editor_{st.session_state.line_items_key}",
             column_config=column_config
         )
         
-        # Sync back to session state
         if edited_lines is not None:
             saved_df = edited_lines.copy()
             if 'Product_Status' in saved_df.columns:
@@ -815,11 +799,7 @@ if st.session_state.header_data is not None:
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
                         st.session_state.shopify_logs = logs
-                        
-                        # Generate Matrix
                         st.session_state.matrix_data = create_product_matrix(updated_lines)
-                        
-                        # Force Refresh
                         st.session_state.line_items_key += 1
                         st.session_state.matrix_key += 1
                         st.success("Check Complete!")
@@ -844,7 +824,6 @@ if st.session_state.header_data is not None:
                 st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
             
             with col_u2:
-                # UNTAPPD BUTTON (Always visible)
                 if st.button("🍺 Search Untappd Details"):
                     if "untappd" in st.secrets:
                         with st.spinner("Searching Untappd..."):
@@ -863,13 +842,10 @@ if st.session_state.header_data is not None:
 
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 
-                # REORDER FOR UNTAPPD VISIBILITY
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # Explicit Order as requested:
-                # Untappd_Status Label_Thumb (mapped to Untappd_Image for display) Untappd_Brewery Untappd_Product Untappd_ABV Untappd_Desc
-                
-                u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
+                # --- EXACT COLUMN ORDER REQUESTED ---
+                u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
                 rest = [c for c in disp_matrix.columns if c not in u_cols and c not in base_cols]
@@ -879,7 +855,7 @@ if st.session_state.header_data is not None:
                 disp_matrix = disp_matrix[valid_cols]
 
                 column_config = {
-                    "Untappd_Image": st.column_config.ImageColumn("Label Thumb"),
+                    "Label_Thumb": st.column_config.ImageColumn("Label"),
                     "Untappd_Status": st.column_config.TextColumn("Found?"),
                 }
                 for i in range(1, 4):
@@ -893,7 +869,6 @@ if st.session_state.header_data is not None:
                     column_config=column_config
                 )
                 
-                # Save changes back
                 if edited_matrix is not None:
                      st.session_state.matrix_data = edited_matrix
 
