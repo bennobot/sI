@@ -814,19 +814,28 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: MISSING PRODUCTS ---
+  # --- TAB 2: MISSING PRODUCTS ---
+    # We render this tab content regardless of matched status, 
+    # but the tab handle itself handles the visibility logic implicitly via list order.
+    
+    # Logic to find the correct index for Tab 2
+    # If all_matched is False, Tab 2 is index 1.
     if not all_matched:
         with current_tabs[1]:
             st.subheader("2. Products to Create in Shopify")
-            st.warning(f"You have {unmatched_count} unmatched items. Resolve them in Shopify, then click 'Check Inventory' again.")
             
-            # UNTAPPD BUTTON
-            if "untappd" in st.secrets:
-                if st.button("🍺 Search Untappd for Missing Items"):
-                     with st.spinner("Searching Untappd..."):
-                         st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
-                         st.success("Search Complete!")
-                         st.rerun()
+            col_u1, col_u2 = st.columns([2, 1])
+            with col_u1:
+                st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
+            
+            with col_u2:
+                # UNTAPPD BUTTON (Now Explicitly Placed Here)
+                if "untappd" in st.secrets:
+                    if st.button("🍺 Search Untappd Details"):
+                         with st.spinner("Searching Untappd API..."):
+                             st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
+                             st.success("Search Complete!")
+                             st.rerun()
 
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
