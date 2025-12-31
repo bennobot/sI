@@ -42,8 +42,115 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. UNTAPPD ENGINE
+# 1. HELPER FUNCTIONS (API & DATA)
 # ==========================================
+
+# --- 1A. GOOGLE DRIVE FUNCTIONS ---
+def get_drive_service():
+    if "gcp_service_account" not in st.secrets:
+        # Fail silently in UI until needed, or check logs
+        return None
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Auth Error: {e}")
+        return None
+
+def list_files_in_folder(folder_id):
+    service = get_drive_service()
+    if not service: return []
+    try:
+        query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+        results = service.files().list(q=query, pageSize=50, fields="nextPageToken, files(id, name)").execute()
+        return results.get('files', [])
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
+        return []
+
+def download_file_from_drive(file_id):
+    service = get_drive_service()
+    if not service: return None
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file_stream = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_stream, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        file_stream.seek(0)
+        return file_stream
+    except Exception as e:
+        st.error(f"Download Error: {e}")
+        return None
+
+# --- 1B. DATA & MATRIX FUNCTIONS ---
+
+def get_master_supplier_list():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(worksheet="MasterData", ttl=600)
+        return df['Supplier_Master'].dropna().astype(str).tolist()
+    except: return []
+
+def normalize_supplier_names(df, master_list):
+    if df is None or df.empty or not master_list: return df
+    def match_name(name):
+        if not isinstance(name, str): return name
+        match, score = process.extractOne(name, master_list)
+        return match if score >= 88 else name
+    if 'Supplier_Name' in df.columns:
+        df['Supplier_Name'] = df['Supplier_Name'].apply(match_name)
+    return df
+
+def clean_product_names(df):
+    if df is None or df.empty: return df
+    def cleaner(name):
+        if not isinstance(name, str): return name
+        name = name.replace('|', '')
+        name = re.sub(r'\b\d+x\d+cl\b', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\b\d+g\b', '', name, flags=re.IGNORECASE)
+        return ' '.join(name.split())
+    if 'Product_Name' in df.columns:
+        df['Product_Name'] = df['Product_Name'].apply(cleaner)
+    return df
+
+def create_product_matrix(df):
+    if df is None or df.empty: return pd.DataFrame()
+    df = df.fillna("")
+    if 'Shopify_Status' in df.columns:
+        df = df[df['Shopify_Status'] != "✅ Matched"]
+    if df.empty: return pd.DataFrame()
+
+    group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    grouped = df.groupby(group_cols, sort=False)
+    matrix_rows = []
+    
+    for name, group in grouped:
+        row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
+        for i, (_, item) in enumerate(group.iterrows()):
+            if i >= 3: break
+            suffix = str(i + 1)
+            row[f'Format{suffix}'] = item['Format']
+            row[f'Pack_Size{suffix}'] = item['Pack_Size']
+            row[f'Volume{suffix}'] = item['Volume']
+            row[f'Item_Price{suffix}'] = item['Item_Price']
+            row[f'Create{suffix}'] = False 
+        matrix_rows.append(row)
+        
+    matrix_df = pd.DataFrame(matrix_rows)
+    base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+    format_cols = []
+    for i in range(1, 4):
+        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
+    final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
+    return matrix_df[final_cols]
+
+# --- 1C. UNTAPPD ENGINE ---
 
 def search_untappd_item(supplier, product):
     if "untappd" not in st.secrets: return None
@@ -110,10 +217,9 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                
-                # --- CHANGE 1: Use label_image_thumb instead of default_image ---
+                # Populating the display column with the thumbnail
                 row['Untappd_Image'] = res['label_image_thumb']
-                
+                # Backing up data
                 row['Label_Img'] = res['label_image']
                 row['Label_HD'] = res['label_image_hd']
                 row['Label_Thumb'] = res['label_image_thumb']
@@ -126,9 +232,7 @@ def batch_untappd_lookup(matrix_df):
         
     return pd.DataFrame(updated_rows), logs
 
-# ==========================================
-# 1B. CIN7 & SHOPIFY (Existing Logic)
-# ==========================================
+# --- 1D. CIN7 & SHOPIFY ---
 
 def get_cin7_headers():
     if "cin7" not in st.secrets: return None
@@ -448,113 +552,7 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 2. DATA & GOOGLE DRIVE FUNCTIONS
-# ==========================================
-
-def get_drive_service():
-    if "gcp_service_account" not in st.secrets:
-        st.error("GCP Secrets missing.")
-        return None
-    try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"Auth Error: {e}")
-        return None
-
-def list_files_in_folder(folder_id):
-    service = get_drive_service()
-    if not service: return []
-    try:
-        query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-        results = service.files().list(q=query, pageSize=50, fields="nextPageToken, files(id, name)").execute()
-        return results.get('files', [])
-    except Exception as e:
-        st.error(f"Drive Error: {e}")
-        return []
-
-def download_file_from_drive(file_id):
-    service = get_drive_service()
-    if not service: return None
-    try:
-        request = service.files().get_media(fileId=file_id)
-        file_stream = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_stream, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        file_stream.seek(0)
-        return file_stream
-    except Exception as e:
-        st.error(f"Download Error: {e}")
-        return None
-
-def get_master_supplier_list():
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="MasterData", ttl=600)
-        return df['Supplier_Master'].dropna().astype(str).tolist()
-    except: return []
-
-def normalize_supplier_names(df, master_list):
-    if df is None or df.empty or not master_list: return df
-    def match_name(name):
-        if not isinstance(name, str): return name
-        match, score = process.extractOne(name, master_list)
-        return match if score >= 88 else name
-    if 'Supplier_Name' in df.columns:
-        df['Supplier_Name'] = df['Supplier_Name'].apply(match_name)
-    return df
-
-def clean_product_names(df):
-    if df is None or df.empty: return df
-    def cleaner(name):
-        if not isinstance(name, str): return name
-        name = name.replace('|', '')
-        name = re.sub(r'\b\d+x\d+cl\b', '', name, flags=re.IGNORECASE)
-        name = re.sub(r'\b\d+g\b', '', name, flags=re.IGNORECASE)
-        return ' '.join(name.split())
-    if 'Product_Name' in df.columns:
-        df['Product_Name'] = df['Product_Name'].apply(cleaner)
-    return df
-
-def create_product_matrix(df):
-    if df is None or df.empty: return pd.DataFrame()
-    df = df.fillna("")
-    if 'Shopify_Status' in df.columns:
-        df = df[df['Shopify_Status'] != "✅ Matched"]
-    if df.empty: return pd.DataFrame()
-
-    group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
-    grouped = df.groupby(group_cols, sort=False)
-    matrix_rows = []
-    
-    for name, group in grouped:
-        row = {'Supplier_Name': name[0], 'Collaborator': name[1], 'Product_Name': name[2], 'ABV': name[3]}
-        for i, (_, item) in enumerate(group.iterrows()):
-            if i >= 3: break
-            suffix = str(i + 1)
-            row[f'Format{suffix}'] = item['Format']
-            row[f'Pack_Size{suffix}'] = item['Pack_Size']
-            row[f'Volume{suffix}'] = item['Volume']
-            row[f'Item_Price{suffix}'] = item['Item_Price']
-            row[f'Create{suffix}'] = False 
-        matrix_rows.append(row)
-        
-    matrix_df = pd.DataFrame(matrix_rows)
-    base_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
-    format_cols = []
-    for i in range(1, 4):
-        format_cols.extend([f'Format{i}', f'Pack_Size{i}', f'Volume{i}', f'Item_Price{i}', f'Create{i}'])
-    final_cols = base_cols + [c for c in format_cols if c in matrix_df.columns]
-    return matrix_df[final_cols]
-
-# ==========================================
-# 3. SESSION & SIDEBAR
+# 2. SESSION & SIDEBAR
 # ==========================================
 
 # Initialize Session State
@@ -615,7 +613,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 4. MAIN LOGIC (SOURCE SELECTION)
+# 3. MAIN LOGIC (SOURCE SELECTION)
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -744,7 +742,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 5. DISPLAY
+# 4. DISPLAY
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -868,7 +866,9 @@ if st.session_state.header_data is not None:
                 # REORDER FOR UNTAPPD VISIBILITY
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # --- CHANGE 2: Added 'Untappd_Desc' after ABV ---
+                # Explicit Order as requested:
+                # Untappd_Status Label_Thumb (mapped to Untappd_Image for display) Untappd_Brewery Untappd_Product Untappd_ABV Untappd_Desc
+                
                 u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
@@ -879,7 +879,7 @@ if st.session_state.header_data is not None:
                 disp_matrix = disp_matrix[valid_cols]
 
                 column_config = {
-                    "Untappd_Image": st.column_config.ImageColumn("Image"),
+                    "Untappd_Image": st.column_config.ImageColumn("Label Thumb"),
                     "Untappd_Status": st.column_config.TextColumn("Found?"),
                 }
                 for i in range(1, 4):
