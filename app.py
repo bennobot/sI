@@ -42,12 +42,11 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. HELPER FUNCTIONS (DEFINED FIRST)
+# 1. HELPER FUNCTIONS
 # ==========================================
 
-# --- 1A. GOOGLE DRIVE (User Provided Snippet) ---
+# --- 1A. GOOGLE DRIVE (User Specific) ---
 def get_drive_service():
-    # Uses the "connections" schema from your working version
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         creds_dict = st.secrets["connections"]["gsheets"]
         creds = service_account.Credentials.from_service_account_info(
@@ -66,7 +65,7 @@ def list_files_in_folder(folder_id):
         files.sort(key=lambda x: x['name'].lower())
         return files
     except Exception as e:
-        st.error(f"Drive Error: {e}")
+        st.error(f"Drive List Error: {e}")
         return []
 
 def download_file_from_drive(file_id):
@@ -111,7 +110,7 @@ def search_untappd_item(supplier, product):
                     "brewery": best.get("brewery"),
                     "abv": best.get("abv"),
                     "description": best.get("description"),
-                    "label_image_thumb": best.get("label_image_thumb"), # Specific request for thumb
+                    "label_image_thumb": best.get("label_image_thumb"),
                     "brewery_location": best.get("brewery_location")
                 }
     except: pass
@@ -120,7 +119,6 @@ def search_untappd_item(supplier, product):
 def batch_untappd_lookup(matrix_df):
     if matrix_df.empty: return matrix_df, ["Matrix Empty"]
     
-    # Ensure these columns exist
     cols = ['Untappd_Status', 'Untappd_ID', 'Untappd_Brewery', 'Untappd_Product', 
             'Untappd_ABV', 'Untappd_Desc', 'Label_Thumb', 'Brewery_Loc']
     
@@ -145,7 +143,6 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                # POPULATE THE THUMBNAIL COLUMN
                 row['Label_Thumb'] = res['label_image_thumb']
                 row['Brewery_Loc'] = res['brewery_location']
             else:
@@ -554,7 +551,7 @@ if 'cin7_all_suppliers' not in st.session_state: st.session_state.cin7_all_suppl
 if 'line_items_key' not in st.session_state: st.session_state.line_items_key = 0
 if 'matrix_key' not in st.session_state: st.session_state.matrix_key = 0
 
-# --- SIDEBAR (NOW DEFINED AFTER FUNCTIONS) ---
+# --- SIDEBAR (Reduced) ---
 with st.sidebar:
     st.header("Settings")
     if "GOOGLE_API_KEY" in st.secrets:
@@ -564,25 +561,6 @@ with st.sidebar:
         api_key = st.text_input("Enter API Key", type="password")
 
     st.info("Logic loaded from `knowledge_base.py`")
-    
-    st.divider()
-    st.subheader("📂 Google Drive")
-    folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
-    
-    if st.button("🔍 Scan Folder"):
-        if folder_id:
-            try:
-                with st.spinner("Scanning..."):
-                    # This function is defined in Section 1A
-                    files = list_files_in_folder(folder_id)
-                    st.session_state.drive_files = files
-                if files:
-                    st.success(f"Found {len(files)} PDFs!")
-                else:
-                    st.warning("No PDFs found or Access Denied.")
-            except Exception as e:
-                st.error(f"Error: {e}")
-    
     st.divider()
     
     st.subheader("🧪 The Lab")
@@ -612,7 +590,27 @@ with tab_upload:
         target_stream = uploaded_file
         source_name = uploaded_file.name
 
+# --- NEW: GOOGLE DRIVE IN MAIN BODY ---
 with tab_drive:
+    col_d1, col_d2 = st.columns([3, 1])
+    with col_d1:
+        folder_id = st.text_input("Drive Folder ID", help="Copy the ID string from the URL")
+    with col_d2:
+        st.write("") # Spacer
+        st.write("")
+        if st.button("🔍 Scan Folder"):
+            if folder_id:
+                try:
+                    with st.spinner("Scanning..."):
+                        files = list_files_in_folder(folder_id)
+                        st.session_state.drive_files = files
+                    if files:
+                        st.success(f"Found {len(files)} PDFs!")
+                    else:
+                        st.warning("No PDFs found or Access Denied.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
     if st.session_state.drive_files:
         file_names = [f['name'] for f in st.session_state.drive_files]
         selected_name = st.selectbox("Select Invoice from Drive List:", options=file_names, index=None, placeholder="Choose a file...")
@@ -622,8 +620,6 @@ with tab_drive:
             st.session_state.selected_drive_name = file_data['name']
             if not uploaded_file:
                 source_name = selected_name
-    else:
-        st.info("👈 Enter a Folder ID in the sidebar and click Scan to see files here.")
 
 # --- PROCESS BUTTON ---
 if st.button("🚀 Process Invoice", type="primary"):
@@ -631,7 +627,6 @@ if st.button("🚀 Process Invoice", type="primary"):
     if not uploaded_file and st.session_state.selected_drive_id:
         try:
             with st.status(f"Downloading {source_name}...", expanded=False) as status:
-                # Defined in Section 1A
                 target_stream = download_file_from_drive(st.session_state.selected_drive_id)
                 status.update(label="Download Complete", state="complete")
         except Exception as e:
@@ -727,7 +722,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 4. TABS & FINAL UI
+# 4. RESULTS DISPLAY
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -843,9 +838,7 @@ if st.session_state.header_data is not None:
                 
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # -----------------------------------------------
-                # FIX: Explicit Column Ordering for Tab 2
-                # -----------------------------------------------
+                # --- CHANGE: STRICT COLUMN ORDERING ---
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
