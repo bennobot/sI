@@ -62,13 +62,11 @@ def get_drive_service():
 def list_files_in_folder(folder_id):
     service = get_drive_service()
     if not service: return []
-    try:
-        query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-        results = service.files().list(q=query, pageSize=50, fields="nextPageToken, files(id, name)").execute()
-        return results.get('files', [])
-    except Exception as e:
-        st.error(f"Drive Error: {e}")
-        return []
+    query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+    results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
+    files = results.get('files', [])
+    files.sort(key=lambda x: x['name'].lower())
+    return files
 
 def download_file_from_drive(file_id):
     service = get_drive_service()
