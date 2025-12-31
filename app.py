@@ -42,27 +42,23 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1A. UNTAPPD ENGINE (NEW)
+# 1A. UNTAPPD ENGINE
 # ==========================================
 
 def search_untappd_item(supplier, product):
-    """
-    Searches Untappd Business API for a beer.
-    Query format: 'Supplier-Product' (spaces replaced by hyphens)
-    """
+    """Searches Untappd Business API"""
     if "untappd" not in st.secrets: return None, None, None
 
     creds = st.secrets["untappd"]
     base_url = creds.get("base_url", "https://business.untappd.com/api/v1")
     token = creds.get("api_token")
     
-    # Construct Query: "Supplier Product" -> "Supplier-Product"
     query_str = f"{supplier} {product}".replace(" ", "-")
-    # URL Encode to be safe (handles & and other chars)
     safe_q = quote(query_str)
-    
     url = f"{base_url}/items/search?q={safe_q}"
     
+    # Headers based on standard Basic Auth or Bearer depending on documentation
+    # Assuming Basic with Token as per your instruction
     headers = {
         "Authorization": f"Basic {token}",
         "Content-Type": "application/json"
@@ -72,12 +68,8 @@ def search_untappd_item(supplier, product):
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            # Depending on structure, usually data['items'] or list
-            # Adjust path based on actual API response structure
             items = data.get('items', [])
-            
             if items:
-                # Return top match
                 best = items[0] 
                 return best.get('id'), best.get('name'), best.get('description', '')
     except: pass
@@ -85,10 +77,9 @@ def search_untappd_item(supplier, product):
     return None, None, None
 
 def batch_untappd_lookup(matrix_df):
-    """Iterates through the missing products matrix and enriches with Untappd Data"""
     if matrix_df.empty: return matrix_df
     
-    # Add columns if missing
+    # Init columns
     if 'Untappd_ID' not in matrix_df.columns:
         matrix_df['Untappd_ID'] = ""
         matrix_df['Untappd_Name'] = ""
@@ -100,7 +91,6 @@ def batch_untappd_lookup(matrix_df):
     for idx, row in matrix_df.iterrows():
         prog_bar.progress((idx + 1) / len(matrix_df))
         
-        # Only search if ID is empty
         if not row.get('Untappd_ID'):
             uid, uname, udesc = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
             if uid:
@@ -355,7 +345,6 @@ def run_reconciliation_check(lines_df):
                 
                 # Format Check
                 shop_fmt_meta = prod.get('format_meta', {}).get('value', '') or ""
-                shop_keg_meta = prod.get('keg_meta', {}).get('value', '') or "" 
                 shop_title_lower = prod['title'].lower()
                 shop_format_str = f"{shop_fmt_meta} {shop_title_lower}".lower()
                 
@@ -561,7 +550,7 @@ if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
 if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
 if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
-if 'cin7_supplier_list' not in st.session_state: st.session_state.cin7_supplier_list = []
+if 'cin7_all_suppliers' not in st.session_state: st.session_state.cin7_all_suppliers = fetch_all_cin7_suppliers_cached()
 
 with st.sidebar:
     st.header("Settings")
@@ -627,6 +616,7 @@ with tab_drive:
             file_data = next(f for f in st.session_state.drive_files if f['name'] == selected_name)
             st.session_state.selected_drive_id = file_data['id']
             st.session_state.selected_drive_name = file_data['name']
+            
             if not uploaded_file:
                 source_name = selected_name
     else:
@@ -711,14 +701,13 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
-                # Initialize columns so Matrix generation doesn't fail on first run
-                df_lines['Shopify_Status'] = "Pending"
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
                 # Clear Logs
                 st.session_state.shopify_logs = []
+                st.session_state.cin7_logs = []
                 st.session_state.matrix_data = None
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
@@ -762,8 +751,9 @@ if st.session_state.header_data is not None:
     
     # --- TAB 1: LINE ITEMS ---
     with current_tabs[0]:
-        st.subheader("1. Review & Reconciliation")
+        st.subheader("1. Review & Edit Lines")
         
+        # EDIT FIRST (Sync State)
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
             display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
@@ -801,40 +791,43 @@ if st.session_state.header_data is not None:
                 saved_df.rename(columns={'Product_Status': 'Shopify_Status'}, inplace=True)
             st.session_state.line_items = saved_df
 
+        # ACTIONS
         col1, col2 = st.columns([1, 4])
         with col1:
             if "shopify" in st.secrets:
-                if st.button("🛒 Check Inventory"):
+                if st.button("🛒 Check Inventory & Generate Report"):
                     with st.spinner("Checking..."):
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
                         st.session_state.shopify_logs = logs
+                        
+                        # Generate Matrix
                         st.session_state.matrix_data = create_product_matrix(updated_lines)
+                        
                         st.success("Check Complete!")
                         st.rerun()
         
         with col2:
-             st.download_button("📥 Download CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
+             st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: PRODUCTS TO UPLOAD ---
+    # --- TAB 2: MISSING PRODUCTS ---
     if not all_matched:
         with current_tabs[1]:
             st.subheader("2. Products to Create in Shopify")
+            st.warning(f"You have {unmatched_count} unmatched items. Resolve them in Shopify, then click 'Check Inventory' again.")
             
-            # --- UNTAPPD INTEGRATION ---
+            # UNTAPPD BUTTON
             if "untappd" in st.secrets:
                 if st.button("🍺 Search Untappd for Missing Items"):
                      with st.spinner("Searching Untappd..."):
                          st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
                          st.success("Search Complete!")
                          st.rerun()
-            
-            st.warning(f"You have {unmatched_count} unmatched items.")
-            
+
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
                 for i in range(1, 4):
@@ -871,9 +864,7 @@ if st.session_state.header_data is not None:
                 selected_supplier = st.selectbox(
                     "Cin7 Supplier Link:", 
                     options=cin7_list_names,
-                    index=default_index,
-                    key="header_supplier_select",
-                    help="Click 'Fetch Cin7 Suppliers' in sidebar if empty."
+                    index=default_index
                 )
                 if selected_supplier and not st.session_state.header_data.empty:
                     supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
@@ -895,6 +886,8 @@ if st.session_state.header_data is not None:
                             st.session_state.line_items, 
                             po_location
                         )
+                        st.session_state.cin7_logs = logs
+                        
                         if success:
                             task_id = None
                             match = re.search(r'ID: ([a-f0-9\-]+)', msg)
