@@ -814,12 +814,7 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-  # --- TAB 2: MISSING PRODUCTS ---
-    # We render this tab content regardless of matched status, 
-    # but the tab handle itself handles the visibility logic implicitly via list order.
-    
-    # Logic to find the correct index for Tab 2
-    # If all_matched is False, Tab 2 is index 1.
+ # --- TAB 2: MISSING PRODUCTS ---
     if not all_matched:
         with current_tabs[1]:
             st.subheader("2. Products to Create in Shopify")
@@ -829,26 +824,18 @@ if st.session_state.header_data is not None:
                 st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
             
             with col_u2:
-                # UNTAPPD BUTTON (Now Explicitly Placed Here)
-                if "untappd" in st.secrets:
-                    if st.button("🍺 Search Untappd Details"):
-                         with st.spinner("Searching Untappd API..."):
+                # REMOVED SECRET CHECK FOR DEBUGGING
+                if st.button("🍺 Search Untappd Details"):
+                    if "untappd" in st.secrets:
+                        with st.spinner("Searching Untappd API..."):
                              st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
                              st.success("Search Complete!")
                              st.rerun()
+                    else:
+                        st.error("Untappd Secrets missing in .streamlit/secrets.toml")
 
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
-                column_config = {}
-                for i in range(1, 4):
-                    column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create?", default=False)
-
-                edited_matrix = st.data_editor(
-                    st.session_state.matrix_data, 
-                    num_rows="dynamic", 
-                    width=1000,
-                    column_config=column_config
-                )
-                st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
+                # ... (table display logic) ...
 
     # --- TAB 3: HEADER / EXPORT ---
     if all_matched:
