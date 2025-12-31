@@ -46,22 +46,21 @@ st.title("Brewery Invoice Parser ⚡")
 # ==========================================
 
 def search_untappd_item(supplier, product):
-    """Searches Untappd Business API"""
-    if "untappd" not in st.secrets: return None, None, None, ["Secrets Missing"]
+    """Searches Untappd and returns full details dict"""
+    if "untappd" not in st.secrets: return None, ["Secrets Missing"]
     
     logs = []
     creds = st.secrets["untappd"]
     base_url = creds.get("base_url", "https://business.untappd.com/api/v1")
     token = creds.get("api_token")
     
-    # Clean Search
-    query_str = f"{supplier} {product}"
+    query_str = f"{supplier} {product}".replace(" ", "-") # Try simple space first
     safe_q = quote(query_str)
     url = f"{base_url}/items/search?q={safe_q}"
     
     headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
     
-    logs.append(f"GET: {url}")
+    # logs.append(f"GET: {url}") # Commented out to reduce noise
     
     try:
         response = requests.get(url, headers=headers)
@@ -71,50 +70,69 @@ def search_untappd_item(supplier, product):
             
             if items:
                 best = items[0]
-                # FIX: Use 'untappd_id' not 'id'
-                u_id = best.get('untappd_id')
-                u_name = best.get('name')
-                u_desc = best.get('description', '')
+                logs.append(f"✅ Found: {best.get('name')}")
                 
-                logs.append(f"✅ Match: {u_name} (ID: {u_id})")
-                return u_id, u_name, u_desc, logs
+                # Extract all needed fields
+                return {
+                    "untappd_id": best.get("untappd_id"),
+                    "name": best.get("name"),
+                    "brewery": best.get("brewery"),
+                    "abv": best.get("abv"),
+                    "description": best.get("description"),
+                    "default_image": best.get("default_image"),
+                    "label_image": best.get("label_image"),
+                    "label_image_hd": best.get("label_image_hd"),
+                    "label_image_thumb": best.get("label_image_thumb"),
+                    "brewery_location": best.get("brewery_location")
+                }, logs
             else:
-                logs.append("❌ No items found.")
-        else:
-            logs.append(f"❌ API Error {response.status_code}: {response.text}")
-            
+                logs.append(f"❌ No results for '{query_str}'")
     except Exception as e: 
         logs.append(f"Exception: {str(e)}")
     
-    return None, None, None, logs
+    return None, logs
 
 def batch_untappd_lookup(matrix_df):
     if matrix_df.empty: return matrix_df, ["Matrix Empty"]
     
-    if 'Untappd_ID' not in matrix_df.columns:
-        matrix_df['Untappd_ID'] = ""
-        matrix_df['Untappd_Name'] = ""
-        matrix_df['Untappd_Desc'] = ""
-        
-    updated_rows = []
+    # Ensure columns exist
+    new_cols = [
+        'Untappd_Status', 'Untappd_ID', 'Untappd_Brewery', 'Untappd_Product', 
+        'Untappd_ABV', 'Untappd_Desc', 'Untappd_Image', 
+        'Label_Img', 'Label_HD', 'Label_Thumb', 'Brewery_Loc'
+    ]
+    for c in new_cols:
+        if c not in matrix_df.columns: matrix_df[c] = ""
+            
     all_logs = []
-    
     prog_bar = st.progress(0)
+    
     for idx, row in matrix_df.iterrows():
         prog_bar.progress((idx + 1) / len(matrix_df))
         
-        # Search if missing
+        # Only search if not already found
         if not row.get('Untappd_ID'):
-            uid, uname, udesc, logs = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
+            result, logs = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
             all_logs.extend(logs)
-            if uid:
-                row['Untappd_ID'] = uid
-                row['Untappd_Name'] = uname
-                row['Untappd_Desc'] = udesc
-        
-        updated_rows.append(row)
-        
-    return pd.DataFrame(updated_rows), all_logs
+            
+            if result:
+                matrix_df.at[idx, 'Untappd_Status'] = "✅ Found"
+                matrix_df.at[idx, 'Untappd_ID'] = result['untappd_id']
+                matrix_df.at[idx, 'Untappd_Brewery'] = result['brewery']
+                matrix_df.at[idx, 'Untappd_Product'] = result['name']
+                matrix_df.at[idx, 'Untappd_ABV'] = result['abv']
+                matrix_df.at[idx, 'Untappd_Desc'] = result['description']
+                matrix_df.at[idx, 'Untappd_Image'] = result['default_image']
+                
+                # Extra fields
+                matrix_df.at[idx, 'Label_Img'] = result['label_image']
+                matrix_df.at[idx, 'Label_HD'] = result['label_image_hd']
+                matrix_df.at[idx, 'Label_Thumb'] = result['label_image_thumb']
+                matrix_df.at[idx, 'Brewery_Loc'] = result['brewery_location']
+            else:
+                 matrix_df.at[idx, 'Untappd_Status'] = "❌ Not Found"
+    
+    return matrix_df, all_logs
 
 # ==========================================
 # 1B. CIN7 CORE ENGINE
@@ -790,44 +808,67 @@ if st.session_state.header_data is not None:
     with t2:
         st.subheader("2. Products to Create in Shopify")
         
-        # Untappd Button
-        col_u1, col_u2 = st.columns([3, 1])
-        with col_u1:
-            st.info("Check the boxes as you create these products.")
-        
-        with col_u2:
-            if st.button("🍺 Search Untappd Details"):
-                if "untappd" in st.secrets:
-                    with st.spinner("Searching Untappd..."):
-                         updated_matrix, u_logs = batch_untappd_lookup(st.session_state.matrix_data)
-                         st.session_state.matrix_data = updated_matrix
-                         st.session_state.untappd_logs = u_logs
-                         st.success("Search Complete!")
-                         st.rerun()
-                else:
-                    st.error("Untappd Secrets Missing")
-                    
-        # Untappd Logs
-        if st.session_state.untappd_logs:
-            with st.expander("🍺 Untappd Logs", expanded=True):
-                st.write(st.session_state.untappd_logs)
-        
-        if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
-            column_config = {}
-            for i in range(1, 4):
-                column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create?", default=False)
-
-            edited_matrix = st.data_editor(
-                st.session_state.matrix_data, 
-                num_rows="dynamic", 
-                width=1000,
-                column_config=column_config
-            )
-            st.download_button("📥 Download To-Do List CSV", edited_matrix.to_csv(index=False), "missing_products.csv")
-        elif st.session_state.matrix_data is not None:
-            st.success("🎉 All products matched! Nothing to create.")
+        if all_matched:
+            st.success("🎉 All products matched! No action needed here.")
         else:
-            st.warning("Run 'Check Inventory' in Tab 1 to generate this report.")
+            col_u1, col_u2 = st.columns([3, 1])
+            with col_u1:
+                st.warning(f"⚠️ {unmatched_count} unmatched items found.")
+            
+            with col_u2:
+                if st.button("🍺 Search Untappd Details"):
+                    if "untappd" in st.secrets:
+                        with st.spinner("Searching Untappd..."):
+                             updated_matrix, logs = batch_untappd_lookup(st.session_state.matrix_data)
+                             st.session_state.matrix_data = updated_matrix
+                             st.session_state.untappd_logs = logs
+                             st.success("Search Complete!")
+                             st.rerun()
+                    else:
+                        st.error("Untappd Secrets Missing")
+            
+            # SHOW LOGS
+            if "untappd_logs" in st.session_state and st.session_state.untappd_logs:
+                with st.expander("Untappd Logs", expanded=False):
+                    for l in st.session_state.untappd_logs: st.text(l)
+
+            if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
+                
+                # PREPARE DISPLAY ORDER
+                display_matrix = st.session_state.matrix_data.copy()
+                
+                # Desired Order: Status, Image, Untappd Info, Original Info, Extra Info
+                u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
+                orig_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
+                fmt_cols = [c for c in display_matrix.columns if 'Format' in c or 'Pack' in c or 'Volume' in c or 'Price' in c]
+                extra_cols = ['Label_Img', 'Label_HD', 'Label_Thumb', 'Untappd_ID', 'Brewery_Loc']
+                create_cols = [c for c in display_matrix.columns if 'Create' in c]
+
+                final_order = u_cols + orig_cols + fmt_cols + create_cols + extra_cols
+                # Filter valid columns
+                valid_cols = [c for c in final_order if c in display_matrix.columns]
+                display_matrix = display_matrix[valid_cols]
+
+                # CONFIGURE COLUMNS
+                column_config = {
+                    "Untappd_Image": st.column_config.ImageColumn("Image", help="Untappd Default Image"),
+                    "Label_Img": st.column_config.LinkColumn("Label Link"),
+                    "Untappd_Status": st.column_config.TextColumn("Found?", width="small"),
+                    "Untappd_Desc": st.column_config.TextColumn("Description", width="large")
+                }
+                
+                # Add checkboxes
+                for i in range(1, 4):
+                    column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create?", default=False)
+
+                edited_matrix = st.data_editor(
+                    display_matrix, 
+                    num_rows="dynamic", 
+                    width=1500, # Wide table
+                    column_config=column_config
+                )
+                
+                st.download_button("📥 Download To-Do List CSV", edited_matrix.to_csv(index=False), "missing_products.csv")
 
     # --- TAB 3: HEADER / EXPORT ---
     with t3:
