@@ -110,7 +110,10 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
-                row['Untappd_Image'] = res['default_image']
+                
+                # --- CHANGE 1: Use label_image_thumb instead of default_image ---
+                row['Untappd_Image'] = res['label_image_thumb']
+                
                 row['Label_Img'] = res['label_image']
                 row['Label_HD'] = res['label_image_hd']
                 row['Label_Thumb'] = res['label_image_thumb']
@@ -445,8 +448,50 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 2. DATA FUNCTIONS
+# 2. DATA & GOOGLE DRIVE FUNCTIONS
 # ==========================================
+
+def get_drive_service():
+    if "gcp_service_account" not in st.secrets:
+        st.error("GCP Secrets missing.")
+        return None
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Auth Error: {e}")
+        return None
+
+def list_files_in_folder(folder_id):
+    service = get_drive_service()
+    if not service: return []
+    try:
+        query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+        results = service.files().list(q=query, pageSize=50, fields="nextPageToken, files(id, name)").execute()
+        return results.get('files', [])
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
+        return []
+
+def download_file_from_drive(file_id):
+    service = get_drive_service()
+    if not service: return None
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file_stream = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_stream, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        file_stream.seek(0)
+        return file_stream
+    except Exception as e:
+        st.error(f"Download Error: {e}")
+        return None
 
 def get_master_supplier_list():
     try:
@@ -822,7 +867,10 @@ if st.session_state.header_data is not None:
                 
                 # REORDER FOR UNTAPPD VISIBILITY
                 disp_matrix = st.session_state.matrix_data.copy()
-                u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV']
+                
+                # --- CHANGE 2: Added 'Untappd_Desc' after ABV ---
+                u_cols = ['Untappd_Status', 'Untappd_Image', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
+                
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
                 rest = [c for c in disp_matrix.columns if c not in u_cols and c not in base_cols]
                 
