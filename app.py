@@ -718,42 +718,30 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 5. DISPLAY
+# 5. DISPLAY & WORKFLOW LOGIC
 # ==========================================
 
 if st.session_state.header_data is not None:
     if custom_rule:
         st.success("✅ Used Custom Rules")
-        try: sup = st.session_state.header_data.iloc[0]['Payable_To']
-        except: sup = "Unknown"
-        with st.expander("📩 Developer Snippet"):
-            st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
     
-    # 1. CALCULATE STATUS
+    # 1. STATUS CHECK
     df = st.session_state.line_items
+    unmatched_count = len(df)
     if 'Shopify_Status' in df.columns:
         unmatched_count = len(df[df['Shopify_Status'] != "✅ Matched"])
-    else:
-        unmatched_count = len(df) 
-
+    
     all_matched = (unmatched_count == 0) and ('Shopify_Status' in df.columns)
 
-    # 2. TABS
-    tabs = ["📝 Line Items (Work Area)"]
-    if not all_matched:
-        tabs.append("⚠️ Products To Upload")
-    if all_matched:
-        tabs.append("🚀 Finalize & Export PO")
-        
-    current_tabs = st.tabs(tabs)
+    # 2. STATIC TABS (Stable UI)
+    t1, t2, t3 = st.tabs(["📝 1. Line Items", "⚠️ 2. Resolve Missing", "🚀 3. Finalize PO"])
     
     # --- TAB 1: LINE ITEMS ---
-    with current_tabs[0]:
+    with t1:
         st.subheader("1. Review & Edit Lines")
         
-        # EDIT FIRST (Sync State)
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
             display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
@@ -791,40 +779,38 @@ if st.session_state.header_data is not None:
                 saved_df.rename(columns={'Product_Status': 'Shopify_Status'}, inplace=True)
             st.session_state.line_items = saved_df
 
-        # ACTIONS
         col1, col2 = st.columns([1, 4])
         with col1:
             if "shopify" in st.secrets:
-                if st.button("🛒 Check Inventory & Generate Report"):
+                if st.button("🛒 Check Inventory"):
                     with st.spinner("Checking..."):
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
                         st.session_state.shopify_logs = logs
-                        
-                        # Generate Matrix
                         st.session_state.matrix_data = create_product_matrix(updated_lines)
-                        
                         st.success("Check Complete!")
                         st.rerun()
         
         with col2:
-             st.download_button("📥 Download Lines CSV", edited_lines.to_csv(index=False), "lines.csv")
+             st.download_button("📥 Download Lines CSV", st.session_state.line_items.to_csv(index=False), "lines.csv")
         
         if st.session_state.shopify_logs:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
- # --- TAB 2: MISSING PRODUCTS ---
-    if not all_matched:
-        with current_tabs[1]:
-            st.subheader("2. Products to Create in Shopify")
-            
-            col_u1, col_u2 = st.columns([2, 1])
+    # --- TAB 2: MISSING PRODUCTS ---
+    with t2:
+        st.subheader("2. Products to Create in Shopify")
+        
+        if all_matched:
+            st.success("🎉 All products matched! No action needed here.")
+        else:
+            col_u1, col_u2 = st.columns([3, 1])
             with col_u1:
                 st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
             
             with col_u2:
-                # REMOVED SECRET CHECK FOR DEBUGGING
+                # FORCE BUTTON VISIBILITY
                 if st.button("🍺 Search Untappd Details"):
                     if "untappd" in st.secrets:
                         with st.spinner("Searching Untappd API..."):
@@ -832,16 +818,29 @@ if st.session_state.header_data is not None:
                              st.success("Search Complete!")
                              st.rerun()
                     else:
-                        st.error("Untappd Secrets missing in .streamlit/secrets.toml")
+                        st.error("Untappd Secrets Missing")
 
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
-                # ... (table display logic) ...
+                column_config = {}
+                for i in range(1, 4):
+                    column_config[f"Create{i}"] = st.column_config.CheckboxColumn(f"Create?", default=False)
+
+                edited_matrix = st.data_editor(
+                    st.session_state.matrix_data, 
+                    num_rows="dynamic", 
+                    width=1000,
+                    column_config=column_config
+                )
+                st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
 
     # --- TAB 3: HEADER / EXPORT ---
-    if all_matched:
-        with current_tabs[1]:
-            st.subheader("3. Finalize & Export")
-            st.success("✅ All products matched! Ready for export.")
+    with t3:
+        st.subheader("3. Finalize & Export")
+        
+        if not all_matched:
+             st.error("🔒 Locked: Please match all items in Tab 1/2 before exporting.")
+        else:
+            st.success("✅ Ready for Export")
             
             current_payee = "Unknown"
             if not st.session_state.header_data.empty:
@@ -860,7 +859,8 @@ if st.session_state.header_data is not None:
                 selected_supplier = st.selectbox(
                     "Cin7 Supplier Link:", 
                     options=cin7_list_names,
-                    index=default_index
+                    index=default_index,
+                    key="header_supplier_select"
                 )
                 if selected_supplier and not st.session_state.header_data.empty:
                     supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
