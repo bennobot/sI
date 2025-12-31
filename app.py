@@ -791,18 +791,22 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: MISSING PRODUCTS ---
+  # --- TAB 2: MISSING PRODUCTS ---
     with t2:
         st.subheader("2. Products to Create in Shopify")
         st.info("Check the boxes as you create these products.")
         
-        # UNTAPPD BUTTON
-        if "untappd" in st.secrets:
-            if st.button("🍺 Search Untappd for Missing Items"):
+        # REMOVED SECRET CHECK FOR DEBUGGING
+        if st.button("🍺 Search Untappd for Missing Items"):
+             if "untappd" in st.secrets:
                  with st.spinner("Searching Untappd..."):
                      st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
                      st.success("Search Complete!")
                      st.rerun()
+             else:
+                 st.error("Untappd Secrets Missing in TOML")
+
+        # ... (Rest of table display) ...
         
         if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
             column_config = {}
