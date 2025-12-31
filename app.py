@@ -249,6 +249,7 @@ def run_reconciliation_check(lines_df):
     logs = []
     df = lines_df.copy()
     
+    # Init columns
     df['Shopify_Status'] = "Pending"
     df['Matched_Product'] = ""
     df['Matched_Variant'] = "" 
@@ -257,99 +258,117 @@ def run_reconciliation_check(lines_df):
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""   
+    
     suppliers = df['Supplier_Name'].unique()
     shopify_cache = {}
     
-    for supplier in suppliers:
+    # 1. Fetch
+    progress_bar = st.progress(0)
+    for i, supplier in enumerate(suppliers):
+        progress_bar.progress((i)/len(suppliers))
+        logs.append(f"🔎 **Fetching Shopify Data:** `{supplier}`")
         products = fetch_shopify_products_by_vendor(supplier)
         shopify_cache[supplier] = products
+        logs.append(f"   -> Found {len(products)} products.")
+    progress_bar.progress(1.0)
 
+    # 2. Match
     results = []
     for _, row in df.iterrows():
         status = "❓ Vendor Not Found"
         london_sku, glou_sku, cin7_l_id, cin7_g_id, img_url = "", "", "", "", ""
         matched_prod_name, matched_var_name = "", ""
+        
         supplier = row['Supplier_Name']
         inv_prod_name = row['Product_Name']
+        
+        # DEBUG: Log exact inputs
         raw_pack = str(row.get('Pack_Size', '')).strip()
         inv_pack = "1" if raw_pack.lower() in ['none', 'nan', '', '0'] else raw_pack.replace('.0', '')
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         inv_fmt = str(row.get('Format', '')).lower()
         
-        logs.append(f"Checking: **{inv_prod_name}**")
+        logs.append(f"👉 **Checking:** `{inv_prod_name}` | Pack:`{inv_pack}` | Vol:`{inv_vol}` | Fmt:`{inv_fmt}`")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
             scored_candidates = []
+            
             for edge in candidates:
                 prod = edge['node']
                 shop_title_full = prod['title']
                 shop_prod_name_clean = shop_title_full
+                
                 if "/" in shop_title_full:
                     parts = [p.strip() for p in shop_title_full.split("/")]
                     if len(parts) >= 2: shop_prod_name_clean = parts[1]
+                
                 score = fuzz.token_sort_ratio(inv_prod_name, shop_prod_name_clean)
                 if inv_prod_name.lower() in shop_prod_name_clean.lower(): score += 10
-                if score > 40: scored_candidates.append((score, prod, shop_prod_name_clean))
+                
+                # DEBUG: Log high scores
+                if score > 50:
+                    scored_candidates.append((score, prod, shop_prod_name_clean))
             
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            
+            # DEBUG: Log top 3 candidates
+            if scored_candidates:
+                logs.append(f"   🏆 Top Match: `{scored_candidates[0][2]}` ({scored_candidates[0][0]}%)")
+            else:
+                logs.append("   ⚠️ No name match found > 50%")
+
             match_found = False
             
             for score, prod, clean_name in scored_candidates:
                 if score < 75: continue 
                 
-                # Format Check
-                shop_fmt_meta = prod.get('format_meta', {}).get('value', '') or ""
-                shop_keg_meta = prod.get('keg_meta', {}).get('value', '') or "" # Need to add to query if used
-                shop_title_lower = prod['title'].lower()
-                shop_format_str = f"{shop_fmt_meta} {shop_title_lower}".lower()
+                # Format Check skipped for debugging to see if size matches at least
                 
-                is_compatible = True
-                if "steel" in inv_fmt:
-                    if "keykeg" in shop_format_str or "poly" in shop_format_str or "dolium" in shop_format_str:
-                        is_compatible = False
-                elif "keykeg" in inv_fmt:
-                    if "steel" in shop_format_str or "stainless" in shop_format_str:
-                        is_compatible = False
-                elif "cask" in inv_fmt or "firkin" in inv_fmt:
-                    if "keg" in shop_format_str and "cask" not in shop_format_str:
-                        is_compatible = False
-                
-                if not is_compatible: continue
-
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
-                    v_sku = str(variant.get('sku', '')).strip()  # FIXED PARENTHESIS HERE
+                    v_sku = str(variant.get('sku', '')).strip()
                     
+                    # Logic
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
                     else:
                         if f"{inv_pack} x" in v_title or f"{inv_pack}x" in v_title: pack_ok = True
+                    
                     vol_ok = False
                     if inv_vol in v_title: vol_ok = True
                     if len(inv_vol) == 2 and f"{inv_vol}0" in v_title: vol_ok = True 
+                    
                     if inv_vol == "9" and "firkin" in v_title: vol_ok = True
                     if (inv_vol == "4" or inv_vol == "4.5") and "pin" in v_title: vol_ok = True
                     if (inv_vol == "40" or inv_vol == "41") and "firkin" in v_title: vol_ok = True
                     if (inv_vol == "20" or inv_vol == "21") and "pin" in v_title: vol_ok = True
                     
                     if pack_ok and vol_ok:
-                        logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
+                        logs.append(f"      ✅ **MATCH VARIANT**: `{variant['title']}` | SKU: `{v_sku}`")
                         status = "✅ Matched"
                         match_found = True
+                        
                         full_title = prod['title']
                         matched_prod_name = full_title[2:] if full_title.startswith("L-") or full_title.startswith("G-") else full_title
                         matched_var_name = variant['title']
                         if prod.get('featuredImage'): img_url = prod['featuredImage']['url']
+                        
                         if v_sku and len(v_sku) > 2:
                             base_sku = v_sku[2:]
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
                         break
+                    else:
+                         # DEBUG: Log why specific variant failed
+                         logs.append(f"      ❌ Variant `{variant['title']}` failed. (PackOK:{pack_ok} VolOK:{vol_ok})")
+
                 if match_found: break
-            if not match_found: status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+            
+            if not match_found: 
+                status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
