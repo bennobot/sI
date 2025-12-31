@@ -805,17 +805,19 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: MISSING PRODUCTS ---
-    if not all_matched:
-        with current_tabs[1]:
-            st.subheader("2. Products to Create in Shopify")
-            
-            # UNTAPPD BUTTON
+   # --- TAB 2: MISSING PRODUCTS ---
+    with t2:
+        st.subheader("2. Products to Create in Shopify")
+        
+        if all_matched:
+            st.success("🎉 All products matched! No action needed here.")
+        else:
             col_u1, col_u2 = st.columns([3, 1])
             with col_u1:
                 st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
             
             with col_u2:
+                # BUTTON ALWAYS VISIBLE
                 if st.button("🍺 Search Untappd Details"):
                     if "untappd" in st.secrets:
                         with st.spinner("Searching Untappd..."):
@@ -823,8 +825,8 @@ if st.session_state.header_data is not None:
                              st.success("Search Complete!")
                              st.rerun()
                     else:
-                        st.error("Untappd Secrets Missing")
-            
+                        st.error("Untappd Secrets Missing in .streamlit/secrets.toml")
+
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
                 for i in range(1, 4):
