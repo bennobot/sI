@@ -42,12 +42,12 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. GOOGLE DRIVE FUNCTIONS (Restored)
+# 1. HELPER FUNCTIONS (DEFINED FIRST)
 # ==========================================
-# Placed here so they exist before the sidebar calls them
 
+# --- 1A. GOOGLE DRIVE (User Provided Snippet) ---
 def get_drive_service():
-    # Matches your specific secrets structure
+    # Uses the "connections" schema from your working version
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         creds_dict = st.secrets["connections"]["gsheets"]
         creds = service_account.Credentials.from_service_account_info(
@@ -59,29 +59,33 @@ def get_drive_service():
 def list_files_in_folder(folder_id):
     service = get_drive_service()
     if not service: return []
-    query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-    results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
-    files = results.get('files', [])
-    files.sort(key=lambda x: x['name'].lower())
-    return files
+    try:
+        query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+        results = service.files().list(q=query, pageSize=100, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        files.sort(key=lambda x: x['name'].lower())
+        return files
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
+        return []
 
 def download_file_from_drive(file_id):
     service = get_drive_service()
     if not service: return None
-    request = service.files().get_media(fileId=file_id)
-    file_stream = io.BytesIO()
-    downloader = MediaIoBaseDownload(file_stream, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    file_stream.seek(0)
-    return file_stream
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file_stream = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_stream, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        file_stream.seek(0)
+        return file_stream
+    except Exception as e:
+        st.error(f"Download Error: {e}")
+        return None
 
-# ==========================================
-# 2. OTHER API FUNCTIONS
-# ==========================================
-
-# --- 2A. UNTAPPD ---
+# --- 1B. UNTAPPD LOGIC ---
 def search_untappd_item(supplier, product):
     if "untappd" not in st.secrets: return None
     creds = st.secrets["untappd"]
@@ -107,7 +111,7 @@ def search_untappd_item(supplier, product):
                     "brewery": best.get("brewery"),
                     "abv": best.get("abv"),
                     "description": best.get("description"),
-                    "label_image_thumb": best.get("label_image_thumb"),
+                    "label_image_thumb": best.get("label_image_thumb"), # Specific request for thumb
                     "brewery_location": best.get("brewery_location")
                 }
     except: pass
@@ -116,7 +120,7 @@ def search_untappd_item(supplier, product):
 def batch_untappd_lookup(matrix_df):
     if matrix_df.empty: return matrix_df, ["Matrix Empty"]
     
-    # Define columns
+    # Ensure these columns exist
     cols = ['Untappd_Status', 'Untappd_ID', 'Untappd_Brewery', 'Untappd_Product', 
             'Untappd_ABV', 'Untappd_Desc', 'Label_Thumb', 'Brewery_Loc']
     
@@ -141,6 +145,7 @@ def batch_untappd_lookup(matrix_df):
                 row['Untappd_Product'] = res['name']
                 row['Untappd_ABV'] = res['abv']
                 row['Untappd_Desc'] = res['description']
+                # POPULATE THE THUMBNAIL COLUMN
                 row['Label_Thumb'] = res['label_image_thumb']
                 row['Brewery_Loc'] = res['brewery_location']
             else:
@@ -151,7 +156,7 @@ def batch_untappd_lookup(matrix_df):
         
     return pd.DataFrame(updated_rows), logs
 
-# --- 2B. CIN7 ---
+# --- 1C. SHOPIFY & CIN7 ---
 def get_cin7_headers():
     if "cin7" not in st.secrets: return None
     creds = st.secrets["cin7"]
@@ -301,7 +306,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             
     return False, "Unknown Error", logs
 
-# --- 2C. SHOPIFY ---
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
     creds = st.secrets["shopify"]
@@ -468,7 +472,6 @@ def run_reconciliation_check(lines_df):
     
     return pd.DataFrame(results), logs
 
-# --- 2D. DATA & MATRIX ---
 def get_master_supplier_list():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -531,7 +534,7 @@ def create_product_matrix(df):
 
 
 # ==========================================
-# 3. SESSION & SIDEBAR
+# 2. SESSION & SIDEBAR
 # ==========================================
 
 # Initialize Session State
@@ -551,6 +554,7 @@ if 'cin7_all_suppliers' not in st.session_state: st.session_state.cin7_all_suppl
 if 'line_items_key' not in st.session_state: st.session_state.line_items_key = 0
 if 'matrix_key' not in st.session_state: st.session_state.matrix_key = 0
 
+# --- SIDEBAR (NOW DEFINED AFTER FUNCTIONS) ---
 with st.sidebar:
     st.header("Settings")
     if "GOOGLE_API_KEY" in st.secrets:
@@ -569,7 +573,7 @@ with st.sidebar:
         if folder_id:
             try:
                 with st.spinner("Scanning..."):
-                    # This function is now defined above, so it will work
+                    # This function is defined in Section 1A
                     files = list_files_in_folder(folder_id)
                     st.session_state.drive_files = files
                 if files:
@@ -593,7 +597,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 4. MAIN LOGIC
+# 3. MAIN UI
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -627,6 +631,7 @@ if st.button("🚀 Process Invoice", type="primary"):
     if not uploaded_file and st.session_state.selected_drive_id:
         try:
             with st.status(f"Downloading {source_name}...", expanded=False) as status:
+                # Defined in Section 1A
                 target_stream = download_file_from_drive(st.session_state.selected_drive_id)
                 status.update(label="Download Complete", state="complete")
         except Exception as e:
@@ -722,7 +727,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 5. DISPLAY UI
+# 4. TABS & FINAL UI
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -838,9 +843,9 @@ if st.session_state.header_data is not None:
                 
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # --- CHANGE: STRICT COLUMN ORDERING ---
-                # Untappd_Status Label_Thumb Untappd_Brewery Untappd_Product Untappd_ABV Untappd_Desc
-                
+                # -----------------------------------------------
+                # FIX: Explicit Column Ordering for Tab 2
+                # -----------------------------------------------
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
@@ -851,7 +856,7 @@ if st.session_state.header_data is not None:
                 disp_matrix = disp_matrix[valid_cols]
 
                 column_config = {
-                    "Label_Thumb": st.column_config.ImageColumn("Label"),
+                    "Label_Thumb": st.column_config.ImageColumn("Label", width="small"),
                     "Untappd_Status": st.column_config.TextColumn("Found?"),
                 }
                 for i in range(1, 4):
@@ -861,7 +866,7 @@ if st.session_state.header_data is not None:
                     disp_matrix, 
                     num_rows="dynamic", 
                     width=1500,
-                    key=f"matrix_editor_{st.session_state.matrix_key}", # Dynamic key
+                    key=f"matrix_editor_{st.session_state.matrix_key}", 
                     column_config=column_config
                 )
                 
