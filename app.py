@@ -47,54 +47,45 @@ st.title("Brewery Invoice Parser ⚡")
 
 def search_untappd_item(supplier, product):
     """Searches Untappd Business API"""
-    if "untappd" not in st.secrets: return None, None, None
+    if "untappd" not in st.secrets: return None, None, None, ["Secrets Missing"]
+    
+    logs = []
     creds = st.secrets["untappd"]
     base_url = creds.get("base_url", "https://business.untappd.com/api/v1")
     token = creds.get("api_token")
     
-    query_str = f"{supplier}-{product}".replace(" ", "-")
+    query_str = f"{supplier} {product}" # Try space first, cleaner search
     safe_q = quote(query_str)
     url = f"{base_url}/items/search?q={safe_q}"
     
     headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+    
+    logs.append(f"GET: {url}")
     
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
             items = data.get('items', [])
+            
             if items:
-                best = items[0] 
-                return best.get('id'), best.get('name'), best.get('description', '')
-    except: pass
-    return None, None, None
-
-def batch_untappd_lookup(matrix_df):
-    if matrix_df.empty: return matrix_df
+                best = items[0]
+                # FIX: Use 'untappd_id' not 'id'
+                u_id = best.get('untappd_id')
+                u_name = best.get('name')
+                u_desc = best.get('description', '')
+                
+                logs.append(f"✅ Match: {u_name} (Untappd ID: {u_id})")
+                return u_id, u_name, u_desc, logs
+            else:
+                logs.append("❌ No items in response list.")
+        else:
+            logs.append(f"❌ Error {response.status_code}: {response.text}")
+            
+    except Exception as e: 
+        logs.append(f"Exception: {str(e)}")
     
-    # Init columns
-    if 'Untappd_ID' not in matrix_df.columns:
-        matrix_df['Untappd_ID'] = ""
-        matrix_df['Untappd_Name'] = ""
-        matrix_df['Untappd_Desc'] = ""
-        
-    updated_rows = []
-    prog_bar = st.progress(0)
-    
-    for idx, row in matrix_df.iterrows():
-        prog_bar.progress((idx + 1) / len(matrix_df))
-        
-        # Only search if missing
-        if not row.get('Untappd_ID'):
-            uid, uname, udesc = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
-            if uid:
-                row['Untappd_ID'] = uid
-                row['Untappd_Name'] = uname
-                row['Untappd_Desc'] = udesc
-        
-        updated_rows.append(row)
-        
-    return pd.DataFrame(updated_rows)
+    return None, None, None, logs
 
 
 # ==========================================
