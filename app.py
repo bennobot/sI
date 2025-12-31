@@ -46,6 +46,7 @@ st.title("Brewery Invoice Parser ⚡")
 # ==========================================
 
 def search_untappd_item(supplier, product):
+    """Searches Untappd Business API"""
     if "untappd" not in st.secrets: return None, None, None
     creds = st.secrets["untappd"]
     base_url = creds.get("base_url", "https://business.untappd.com/api/v1")
@@ -70,6 +71,8 @@ def search_untappd_item(supplier, product):
 
 def batch_untappd_lookup(matrix_df):
     if matrix_df.empty: return matrix_df
+    
+    # Init columns
     if 'Untappd_ID' not in matrix_df.columns:
         matrix_df['Untappd_ID'] = ""
         matrix_df['Untappd_Name'] = ""
@@ -77,15 +80,20 @@ def batch_untappd_lookup(matrix_df):
         
     updated_rows = []
     prog_bar = st.progress(0)
+    
     for idx, row in matrix_df.iterrows():
         prog_bar.progress((idx + 1) / len(matrix_df))
+        
+        # Only search if missing
         if not row.get('Untappd_ID'):
             uid, uname, udesc = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
             if uid:
                 row['Untappd_ID'] = uid
                 row['Untappd_Name'] = uname
                 row['Untappd_Desc'] = udesc
+        
         updated_rows.append(row)
+        
     return pd.DataFrame(updated_rows)
 
 # ==========================================
@@ -323,7 +331,7 @@ def run_reconciliation_check(lines_df):
         inv_vol = normalize_vol_string(row.get('Volume', ''))
         inv_fmt = str(row.get('Format', '')).lower()
         
-        logs.append(f"Checking: **{inv_prod_name}**")
+        logs.append(f"Checking: **{inv_prod_name}** ({inv_fmt})")
 
         if supplier in shopify_cache and shopify_cache[supplier]:
             candidates = shopify_cache[supplier]
@@ -690,14 +698,13 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
-                # Initialize columns so Matrix generation doesn't fail on first run
-                df_lines['Shopify_Status'] = "Pending"
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
                 st.session_state.line_items = df_lines[existing]
                 
                 # Clear Logs
                 st.session_state.shopify_logs = []
+                st.session_state.cin7_logs = []
                 st.session_state.matrix_data = None
                 
                 status.update(label="Processing Complete!", state="complete", expanded=False)
@@ -720,30 +727,13 @@ if st.session_state.header_data is not None:
             st.code(f'"{sup}": """\n{custom_rule}\n""",', language="python")
 
     st.divider()
-    
-    # 1. CALCULATE STATUS
-    df = st.session_state.line_items
-    if 'Shopify_Status' in df.columns:
-        unmatched_count = len(df[df['Shopify_Status'] != "✅ Matched"])
-    else:
-        unmatched_count = len(df) 
-
-    all_matched = (unmatched_count == 0) and ('Shopify_Status' in df.columns)
-
-    # 2. TABS
-    tabs = ["📝 Line Items (Work Area)"]
-    if not all_matched:
-        tabs.append("⚠️ Products To Upload")
-    if all_matched:
-        tabs.append("🚀 Finalize & Export PO")
-        
-    current_tabs = st.tabs(tabs)
+    t1, t2, t3 = st.tabs(["📝 Line Items (Work Area)", "📊 Missing Products Report", "📄 Invoice Header"])
     
     # --- TAB 1: LINE ITEMS ---
-    with current_tabs[0]:
+    with t1:
         st.subheader("1. Review & Edit Lines")
         
-        # PREPARE DISPLAY
+        # EDIT FIRST (Sync State)
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
             display_df.rename(columns={'Shopify_Status': 'Product_Status'}, inplace=True)
@@ -767,7 +757,6 @@ if st.session_state.header_data is not None:
             "Matched_Variant": st.column_config.TextColumn("Variant Match", disabled=True),
         }
 
-        # EDIT
         edited_lines = st.data_editor(
             display_df, 
             num_rows="dynamic", 
@@ -776,7 +765,7 @@ if st.session_state.header_data is not None:
             column_config=column_config
         )
         
-        # SYNC
+        # Sync
         if edited_lines is not None:
             saved_df = edited_lines.copy()
             if 'Product_Status' in saved_df.columns:
@@ -786,7 +775,7 @@ if st.session_state.header_data is not None:
         col1, col2 = st.columns([1, 4])
         with col1:
             if "shopify" in st.secrets:
-                if st.button("🛒 Check Inventory"):
+                if st.button("🛒 Check Inventory & Generate Report"):
                     with st.spinner("Checking..."):
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
@@ -805,27 +794,21 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-   # --- TAB 2: MISSING PRODUCTS ---
-    with t2:
-        st.subheader("2. Products to Create in Shopify")
-        
-        if all_matched:
-            st.success("🎉 All products matched! No action needed here.")
-        else:
-            col_u1, col_u2 = st.columns([3, 1])
-            with col_u1:
-                st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
+    # --- TAB 2: MISSING PRODUCTS ---
+    if not all_matched:
+        with current_tabs[1]:
+            st.subheader("2. Products to Create in Shopify")
+            st.warning(f"You have {unmatched_count} unmatched items. Resolve them in Shopify, then click 'Check Inventory' again.")
             
+            col_u1, col_u2 = st.columns([3, 1])
             with col_u2:
-                # BUTTON ALWAYS VISIBLE
-                if st.button("🍺 Search Untappd Details"):
-                    if "untappd" in st.secrets:
-                        with st.spinner("Searching Untappd..."):
+                # UNTAPPD BUTTON
+                if "untappd" in st.secrets:
+                    if st.button("🍺 Search Untappd Details"):
+                         with st.spinner("Searching Untappd..."):
                              st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
                              st.success("Search Complete!")
                              st.rerun()
-                    else:
-                        st.error("Untappd Secrets Missing in .streamlit/secrets.toml")
 
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
@@ -867,7 +850,6 @@ if st.session_state.header_data is not None:
                     key="header_supplier_select",
                     help="Click 'Fetch Cin7 Suppliers' in sidebar if empty."
                 )
-                
                 if selected_supplier and not st.session_state.header_data.empty:
                     supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
                     if supp_data:
@@ -893,8 +875,6 @@ if st.session_state.header_data is not None:
                             st.session_state.line_items, 
                             po_location
                         )
-                        st.session_state.cin7_logs = logs
-                        
                         if success:
                             task_id = None
                             match = re.search(r'ID: ([a-f0-9\-]+)', msg)
