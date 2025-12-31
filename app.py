@@ -42,7 +42,78 @@ if not check_password(): st.stop()
 st.title("Brewery Invoice Parser ⚡")
 
 # ==========================================
-# 1. CIN7 CORE ENGINE
+# 1A. UNTAPPD ENGINE (NEW)
+# ==========================================
+
+def search_untappd_item(supplier, product):
+    """
+    Searches Untappd Business API for a beer.
+    Query format: 'Supplier-Product' (spaces replaced by hyphens)
+    """
+    if "untappd" not in st.secrets: return None, None, None
+
+    creds = st.secrets["untappd"]
+    base_url = creds.get("base_url", "https://business.untappd.com/api/v1")
+    token = creds.get("api_token")
+    
+    # Construct Query: "Supplier Product" -> "Supplier-Product"
+    query_str = f"{supplier} {product}".replace(" ", "-")
+    # URL Encode to be safe (handles & and other chars)
+    safe_q = quote(query_str)
+    
+    url = f"{base_url}/items/search?q={safe_q}"
+    
+    headers = {
+        "Authorization": f"Basic {token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            # Depending on structure, usually data['items'] or list
+            # Adjust path based on actual API response structure
+            items = data.get('items', [])
+            
+            if items:
+                # Return top match
+                best = items[0] 
+                return best.get('id'), best.get('name'), best.get('description', '')
+    except: pass
+    
+    return None, None, None
+
+def batch_untappd_lookup(matrix_df):
+    """Iterates through the missing products matrix and enriches with Untappd Data"""
+    if matrix_df.empty: return matrix_df
+    
+    # Add columns if missing
+    if 'Untappd_ID' not in matrix_df.columns:
+        matrix_df['Untappd_ID'] = ""
+        matrix_df['Untappd_Name'] = ""
+        matrix_df['Untappd_Desc'] = ""
+        
+    updated_rows = []
+    prog_bar = st.progress(0)
+    
+    for idx, row in matrix_df.iterrows():
+        prog_bar.progress((idx + 1) / len(matrix_df))
+        
+        # Only search if ID is empty
+        if not row.get('Untappd_ID'):
+            uid, uname, udesc = search_untappd_item(row['Supplier_Name'], row['Product_Name'])
+            if uid:
+                row['Untappd_ID'] = uid
+                row['Untappd_Name'] = uname
+                row['Untappd_Desc'] = udesc
+        
+        updated_rows.append(row)
+        
+    return pd.DataFrame(updated_rows)
+
+# ==========================================
+# 1B. CIN7 CORE ENGINE
 # ==========================================
 
 def get_cin7_headers():
@@ -141,7 +212,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = round(qty * price, 2)
-            
             order_lines.append({
                 "ProductID": prod_id, 
                 "Quantity": qty, 
@@ -197,7 +267,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     return False, "Unknown Error", logs
 
 # ==========================================
-# 2. SHOPIFY ENGINE
+# 1C. SHOPIFY ENGINE
 # ==========================================
 
 def fetch_shopify_products_by_vendor(vendor):
@@ -211,28 +281,13 @@ def fetch_shopify_products_by_vendor(vendor):
     query = """query ($query: String!, $cursor: String) { products(first: 50, query: $query, after: $cursor) { pageInfo { hasNextPage endCursor } edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
-    
-    all_products = []
-    cursor = None
-    has_next = True
-    
-    while has_next:
-        vars_curr = variables.copy()
-        if cursor: vars_curr['cursor'] = cursor
-        try:
-            response = requests.post(endpoint, json={"query": query, "variables": vars_curr}, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                if "data" in data and "products" in data["data"]:
-                    p_data = data["data"]["products"]
-                    all_products.extend(p_data["edges"])
-                    has_next = p_data["pageInfo"]["hasNextPage"]
-                    cursor = p_data["pageInfo"]["endCursor"]
-                else: has_next = False
-            else: has_next = False
-        except: has_next = False
-            
-    return all_products
+    try:
+        response = requests.post(endpoint, json={"query": query, "variables": variables}, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and "products" in data["data"]: return data["data"]["products"]["edges"]
+    except: pass
+    return []
 
 def normalize_vol_string(v_str):
     if not v_str: return "0"
@@ -300,28 +355,24 @@ def run_reconciliation_check(lines_df):
                 
                 # Format Check
                 shop_fmt_meta = prod.get('format_meta', {}).get('value', '') or ""
-                shop_keg_meta = prod.get('keg_meta', {}).get('value', '') or "" # Need to add to query if used
+                shop_keg_meta = prod.get('keg_meta', {}).get('value', '') or "" 
                 shop_title_lower = prod['title'].lower()
                 shop_format_str = f"{shop_fmt_meta} {shop_title_lower}".lower()
                 
                 is_compatible = True
                 if "steel" in inv_fmt:
-                    if "keykeg" in shop_format_str or "poly" in shop_format_str or "dolium" in shop_format_str:
-                        is_compatible = False
+                    if "keykeg" in shop_format_str or "poly" in shop_format_str or "dolium" in shop_format_str: is_compatible = False
                 elif "keykeg" in inv_fmt:
-                    if "steel" in shop_format_str or "stainless" in shop_format_str:
-                        is_compatible = False
+                    if "steel" in shop_format_str or "stainless" in shop_format_str: is_compatible = False
                 elif "cask" in inv_fmt or "firkin" in inv_fmt:
-                    if "keg" in shop_format_str and "cask" not in shop_format_str:
-                        is_compatible = False
+                    if "keg" in shop_format_str and "cask" not in shop_format_str: is_compatible = False
                 
                 if not is_compatible: continue
 
                 for v_edge in prod['variants']['edges']:
                     variant = v_edge['node']
                     v_title = variant['title'].lower()
-                    v_sku = str(variant.get('sku', '')).strip()  # FIXED PARENTHESIS HERE
-                    
+                    v_sku = str(variant.get('sku', '')).strip()
                     pack_ok = False
                     if inv_pack == "1":
                         if " x " not in v_title: pack_ok = True
@@ -367,7 +418,7 @@ def run_reconciliation_check(lines_df):
     return pd.DataFrame(results), logs
 
 # ==========================================
-# 3. DATA FUNCTIONS
+# 2. DATA FUNCTIONS
 # ==========================================
 
 def get_master_supplier_list():
@@ -452,6 +503,19 @@ def reconstruct_lines_from_matrix(matrix_df):
                 new_lines.append(line)
     return pd.DataFrame(new_lines)
 
+def create_product_checker(df):
+    if df is None or df.empty: return pd.DataFrame()
+    checker_rows = []
+    for _, row in df.iterrows():
+        abv = str(row['ABV']).replace('%', '') + "%" if row['ABV'] else ""
+        parts = [str(row['Supplier_Name']), str(row['Product_Name']), abv, str(row['Format'])]
+        col1 = " / ".join([p for p in parts if p and p.lower() != 'none'])
+        pack = str(row['Pack_Size']).replace('.0', '') if row['Pack_Size'] else ""
+        vol = str(row['Volume'])
+        col2 = f"{pack}x{vol}" if (pack and pack != '0' and pack != '1') else vol
+        checker_rows.append({"ERP_String": col1, "Size_String": col2})
+    return pd.DataFrame(checker_rows).drop_duplicates()
+
 # --- GOOGLE DRIVE HELPERS ---
 def get_drive_service():
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
@@ -484,19 +548,20 @@ def download_file_from_drive(file_id):
     return file_stream
 
 # ==========================================
-# 4. SESSION & SIDEBAR
+# 3. SESSION & SIDEBAR
 # ==========================================
 
 # Initialize Session State
 if 'header_data' not in st.session_state: st.session_state.header_data = None
 if 'line_items' not in st.session_state: st.session_state.line_items = None
 if 'matrix_data' not in st.session_state: st.session_state.matrix_data = None
+if 'checker_data' not in st.session_state: st.session_state.checker_data = None
 if 'master_suppliers' not in st.session_state: st.session_state.master_suppliers = get_master_supplier_list()
 if 'drive_files' not in st.session_state: st.session_state.drive_files = []
 if 'selected_drive_id' not in st.session_state: st.session_state.selected_drive_id = None
 if 'selected_drive_name' not in st.session_state: st.session_state.selected_drive_name = None
 if 'shopify_logs' not in st.session_state: st.session_state.shopify_logs = []
-if 'cin7_all_suppliers' not in st.session_state: st.session_state.cin7_all_suppliers = fetch_all_cin7_suppliers_cached()
+if 'cin7_supplier_list' not in st.session_state: st.session_state.cin7_supplier_list = []
 
 with st.sidebar:
     st.header("Settings")
@@ -539,7 +604,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. MAIN LOGIC (SOURCE SELECTION)
+# 4. MAIN LOGIC (SOURCE SELECTION)
 # ==========================================
 
 st.subheader("1. Select Invoice Source")
@@ -646,7 +711,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 if st.session_state.master_suppliers:
                     df_lines = normalize_supplier_names(df_lines, st.session_state.master_suppliers)
 
-                # Initialize columns
+                # Initialize columns so Matrix generation doesn't fail on first run
                 df_lines['Shopify_Status'] = "Pending"
                 cols = ["Supplier_Name", "Collaborator", "Product_Name", "ABV", "Format", "Pack_Size", "Volume", "Item_Price", "Quantity"]
                 existing = [c for c in cols if c in df_lines.columns]
@@ -664,7 +729,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         st.warning("Please upload a file or select one from Google Drive first.")
 
 # ==========================================
-# 5. DISPLAY & WORKFLOW LOGIC
+# 5. DISPLAY
 # ==========================================
 
 if st.session_state.header_data is not None:
@@ -682,16 +747,22 @@ if st.session_state.header_data is not None:
     if 'Shopify_Status' in df.columns:
         unmatched_count = len(df[df['Shopify_Status'] != "✅ Matched"])
     else:
-        unmatched_count = len(df) # Assume dirty start
+        unmatched_count = len(df) 
 
     all_matched = (unmatched_count == 0) and ('Shopify_Status' in df.columns)
 
-    # 2. RENDER 3 STATIC TABS
-    t1, t2, t3 = st.tabs(["📝 1. Line Items", "⚠️ 2. Resolve Missing", "🚀 3. Finalize PO"])
+    # 2. TABS
+    tabs = ["📝 Line Items (Work Area)"]
+    if not all_matched:
+        tabs.append("⚠️ Products To Upload")
+    if all_matched:
+        tabs.append("🚀 Finalize & Export PO")
+        
+    current_tabs = st.tabs(tabs)
     
     # --- TAB 1: LINE ITEMS ---
-    with t1:
-        st.subheader("Review & Reconciliation")
+    with current_tabs[0]:
+        st.subheader("1. Review & Reconciliation")
         
         display_df = st.session_state.line_items.copy()
         if 'Shopify_Status' in display_df.columns:
@@ -733,7 +804,7 @@ if st.session_state.header_data is not None:
         col1, col2 = st.columns([1, 4])
         with col1:
             if "shopify" in st.secrets:
-                if st.button("🛒 Check Inventory", type="primary"):
+                if st.button("🛒 Check Inventory"):
                     with st.spinner("Checking..."):
                         updated_lines, logs = run_reconciliation_check(st.session_state.line_items)
                         st.session_state.line_items = updated_lines
@@ -749,13 +820,20 @@ if st.session_state.header_data is not None:
             with st.expander("🕵️ Debug Logs", expanded=False):
                 st.markdown("\n".join(st.session_state.shopify_logs))
 
-    # --- TAB 2: MISSING PRODUCTS ---
-    with t2:
-        if all_matched:
-            st.success("🎉 No missing products! You can skip this tab.")
-        else:
-            st.subheader("Create New Products")
-            st.warning(f"⚠️ {unmatched_count} unmatched items found. Please create them in Shopify.")
+    # --- TAB 2: PRODUCTS TO UPLOAD ---
+    if not all_matched:
+        with current_tabs[1]:
+            st.subheader("2. Products to Create in Shopify")
+            
+            # --- UNTAPPD INTEGRATION ---
+            if "untappd" in st.secrets:
+                if st.button("🍺 Search Untappd for Missing Items"):
+                     with st.spinner("Searching Untappd..."):
+                         st.session_state.matrix_data = batch_untappd_lookup(st.session_state.matrix_data)
+                         st.success("Search Complete!")
+                         st.rerun()
+            
+            st.warning(f"You have {unmatched_count} unmatched items.")
             
             if st.session_state.matrix_data is not None and not st.session_state.matrix_data.empty:
                 column_config = {}
@@ -771,15 +849,11 @@ if st.session_state.header_data is not None:
                 st.download_button("📥 Download To-Do List", edited_matrix.to_csv(index=False), "missing_products.csv")
 
     # --- TAB 3: HEADER / EXPORT ---
-    with t3:
-        if not all_matched:
-            st.error("🔒 **LOCKED**: Please resolve all unmatched items in Tab 2 before exporting.")
-            st.info(f"Remaining Issues: {unmatched_count}")
-        else:
+    if all_matched:
+        with current_tabs[1]:
             st.subheader("3. Finalize & Export")
-            st.success("✅ Ready for Export")
+            st.success("✅ All products matched! Ready for export.")
             
-            # --- SUPPLIER LINK LOGIC ---
             current_payee = "Unknown"
             if not st.session_state.header_data.empty:
                  current_payee = st.session_state.header_data.iloc[0]['Payable_To']
@@ -797,7 +871,9 @@ if st.session_state.header_data is not None:
                 selected_supplier = st.selectbox(
                     "Cin7 Supplier Link:", 
                     options=cin7_list_names,
-                    index=default_index
+                    index=default_index,
+                    key="header_supplier_select",
+                    help="Click 'Fetch Cin7 Suppliers' in sidebar if empty."
                 )
                 if selected_supplier and not st.session_state.header_data.empty:
                     supp_data = next((s for s in st.session_state.cin7_all_suppliers if s['Name'] == selected_supplier), None)
@@ -809,7 +885,6 @@ if st.session_state.header_data is not None:
             
             st.divider()
             
-            # --- EXPORT BUTTON ---
             po_location = st.selectbox("Select Delivery Location:", ["London", "Gloucester"], key="final_po_loc")
             
             if st.button(f"📤 Export PO to Cin7 ({po_location})", type="primary"):
