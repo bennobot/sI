@@ -250,8 +250,8 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        # Check for new "Match" status
-        if row.get('Shopify_Status') == "Match" and pd.notna(prod_id) and str(prod_id).strip():
+        # --- UPDATE: Check for "✅ Match" ---
+        if row.get('Shopify_Status') == "✅ Match" and pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = round(qty * price, 2)
@@ -448,7 +448,8 @@ def run_reconciliation_check(lines_df):
                     
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
-                        status = "Match"
+                        # --- UPDATE: GREEN STATUS ---
+                        status = "✅ Match"
                         match_found = True
                         full_title = prod['title']
                         matched_prod_name = full_title[2:] if full_title.startswith("L-") or full_title.startswith("G-") else full_title
@@ -458,12 +459,12 @@ def run_reconciliation_check(lines_df):
                             base_sku = v_sku[2:]
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
-                        # IMPORTANT: Do not append results here to avoid duplication
                         break
                 if match_found: break
             
+            # --- UPDATE: RED STATUS ---
             if not match_found: 
-                status = "Check and Upload"
+                status = "🟥 Check and Upload"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
@@ -476,8 +477,6 @@ def run_reconciliation_check(lines_df):
         row['Cin7_London_ID'] = cin7_l_id
         row['Gloucester_SKU'] = glou_sku
         row['Cin7_Glou_ID'] = cin7_g_id
-        
-        # APPEND RESULTS EXACTLY ONCE
         results.append(row)
     
     return pd.DataFrame(results), logs
@@ -514,8 +513,9 @@ def clean_product_names(df):
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
+    # --- UPDATE: Check for "✅ Match" ---
     if 'Shopify_Status' in df.columns:
-        df = df[df['Shopify_Status'] != "Match"]
+        df = df[df['Shopify_Status'] != "✅ Match"]
     if df.empty: return pd.DataFrame()
 
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
@@ -573,7 +573,7 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter API Key", type="password")
 
-    # --- DEBUGGING TOOL: FIXED LISTER ---
+    # --- DEBUGGING TOOL ---
     if st.button("🛠️ List Available Models"):
         if api_key:
             try:
@@ -707,7 +707,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 {full_text}
                 """
 
-                # --- GENERATION CALL (USING 2.5-flash as verified by user) ---
+                # --- GENERATION CALL (USING 2.5-flash as verified) ---
                 response = client.models.generate_content(
                     model='gemini-2.5-flash', 
                     contents=prompt
@@ -769,7 +769,8 @@ if st.session_state.header_data is not None:
     # 1. CALCULATE STATUS
     df = st.session_state.line_items
     if 'Shopify_Status' in df.columns:
-        unmatched_count = len(df[df['Shopify_Status'] != "Match"])
+        # --- UPDATE: Check for "✅ Match" ---
+        unmatched_count = len(df[df['Shopify_Status'] != "✅ Match"])
     else:
         unmatched_count = len(df) 
 
