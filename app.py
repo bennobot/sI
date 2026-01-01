@@ -310,10 +310,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
-    
-    # --- FIX: SAFEGUARD AGAINST NONE/NAN VENDOR ---
-    if not vendor or not isinstance(vendor, str):
-        return []
+    if not vendor or not isinstance(vendor, str): return []
     
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
@@ -322,7 +319,6 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     query = """query ($query: String!, $cursor: String) { products(first: 50, query: $query, after: $cursor) { pageInfo { hasNextPage endCursor } edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
-    
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
     
@@ -372,7 +368,6 @@ def run_reconciliation_check(lines_df):
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""   
     
-    # Filter suppliers to ensure they are valid strings
     suppliers = [s for s in df['Supplier_Name'].unique() if isinstance(s, str) and s.strip()]
     shopify_cache = {}
     
@@ -391,9 +386,7 @@ def run_reconciliation_check(lines_df):
         london_sku, glou_sku, cin7_l_id, cin7_g_id, img_url = "", "", "", "", ""
         matched_prod_name, matched_var_name = "", ""
         
-        # Safe string conversion for supplier logic
         supplier = str(row.get('Supplier_Name', ''))
-        
         inv_prod_name = row['Product_Name']
         raw_pack = str(row.get('Pack_Size', '')).strip()
         inv_pack = "1" if raw_pack.lower() in ['none', 'nan', '', '0'] else raw_pack.replace('.0', '')
@@ -422,7 +415,6 @@ def run_reconciliation_check(lines_df):
             for score, prod, clean_name in scored_candidates:
                 if score < 75: continue 
                 
-                # Format Check
                 shop_fmt_meta = prod.get('format_meta', {}).get('value', '') or ""
                 shop_title_lower = prod['title'].lower()
                 shop_format_str = f"{shop_fmt_meta} {shop_title_lower}".lower()
@@ -466,10 +458,12 @@ def run_reconciliation_check(lines_df):
                             base_sku = v_sku[2:]
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
-                        results.append(row)
+                        # IMPORTANT: Do not append results here to avoid duplication
                         break
                 if match_found: break
-            if not match_found: status = "Check and Upload"
+            
+            if not match_found: 
+                status = "Check and Upload"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
@@ -482,6 +476,8 @@ def run_reconciliation_check(lines_df):
         row['Cin7_London_ID'] = cin7_l_id
         row['Gloucester_SKU'] = glou_sku
         row['Cin7_Glou_ID'] = cin7_g_id
+        
+        # APPEND RESULTS EXACTLY ONCE
         results.append(row)
     
     return pd.DataFrame(results), logs
