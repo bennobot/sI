@@ -45,7 +45,7 @@ st.title("Brewery Invoice Parser ⚡")
 # 1. HELPER FUNCTIONS
 # ==========================================
 
-# --- 1A. GOOGLE DRIVE (User Specific) ---
+# --- 1A. GOOGLE DRIVE ---
 def get_drive_service():
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         creds_dict = st.secrets["connections"]["gsheets"]
@@ -246,7 +246,8 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        if row.get('Shopify_Status') == "✅ Matched" and pd.notna(prod_id) and str(prod_id).strip():
+        # --- UPDATE: Check for "Match" instead of "✅ Matched" ---
+        if row.get('Shopify_Status') == "Match" and pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
             total = round(qty * price, 2)
@@ -440,7 +441,10 @@ def run_reconciliation_check(lines_df):
                     
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
-                        status = "✅ Matched"
+                        
+                        # --- UPDATE: Status Name ---
+                        status = "Match"
+                        
                         match_found = True
                         full_title = prod['title']
                         matched_prod_name = full_title[2:] if full_title.startswith("L-") or full_title.startswith("G-") else full_title
@@ -452,7 +456,10 @@ def run_reconciliation_check(lines_df):
                             glou_sku = f"G-{base_sku}"
                         break
                 if match_found: break
-            if not match_found: status = "❌ Size Missing" if scored_candidates else "🆕 New Product"
+            
+            # --- UPDATE: Consolidated Unmatched Status ---
+            if not match_found: 
+                status = "Check and Upload"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
@@ -501,8 +508,11 @@ def clean_product_names(df):
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
+    
+    # --- UPDATE: Check for "Match" instead of "✅ Matched" ---
     if 'Shopify_Status' in df.columns:
-        df = df[df['Shopify_Status'] != "✅ Matched"]
+        df = df[df['Shopify_Status'] != "Match"]
+        
     if df.empty: return pd.DataFrame()
 
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
@@ -590,7 +600,7 @@ with tab_upload:
         target_stream = uploaded_file
         source_name = uploaded_file.name
 
-# --- NEW: GOOGLE DRIVE IN MAIN BODY ---
+# --- GOOGLE DRIVE IN MAIN BODY ---
 with tab_drive:
     col_d1, col_d2 = st.columns([3, 1])
     with col_d1:
@@ -734,7 +744,8 @@ if st.session_state.header_data is not None:
     # 1. CALCULATE STATUS
     df = st.session_state.line_items
     if 'Shopify_Status' in df.columns:
-        unmatched_count = len(df[df['Shopify_Status'] != "✅ Matched"])
+        # --- UPDATE: Check for "Match" ---
+        unmatched_count = len(df[df['Shopify_Status'] != "Match"])
     else:
         unmatched_count = len(df) 
 
@@ -838,7 +849,6 @@ if st.session_state.header_data is not None:
                 
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # --- CHANGE: STRICT COLUMN ORDERING ---
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
