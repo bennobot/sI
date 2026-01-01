@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 from pdf2image import convert_from_bytes
 import pytesseract
-from google import genai # <--- UPDATED LIBRARY
-from google.genai import types
+from google import genai # Using the new, non-deprecated library
 import json
 import re
 import io
 import requests
 import time
+import warnings
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from streamlit_gsheets import GSheetsConnection
@@ -640,7 +640,7 @@ if st.button("🚀 Process Invoice", type="primary"):
         try:
             with st.status("Processing Document...", expanded=True) as status:
                 
-                # --- UPDATE: USE NEW CLIENT SDK ---
+                # --- NEW CLIENT INIT ---
                 client = genai.Client(api_key=api_key)
                 
                 st.write("1. Converting PDF to Images (OCR Prep)...")
@@ -679,9 +679,9 @@ if st.button("🚀 Process Invoice", type="primary"):
                 {full_text}
                 """
 
-                # --- UPDATE: USE NEW GENERATION METHOD ---
+                # --- NEW GENERATION CALL USING SPECIFIC VERSION ---
                 response = client.models.generate_content(
-                    model='gemini-1.5-flash', 
+                    model='gemini-1.5-flash-001', # Fixed explicit version to prevent 404
                     contents=prompt
                 )
                 
