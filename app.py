@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from pdf2image import convert_from_bytes
 import pytesseract
-from google import genai # Using the new, non-deprecated library
+from google import genai
 import json
 import re
 import io
@@ -19,6 +19,9 @@ from googleapiclient.http import MediaIoBaseDownload
 
 # Import the Brain
 from knowledge_base import GLOBAL_RULES_TEXT, SUPPLIER_RULEBOOK
+
+# --- SUPPRESS GOOGLE WARNING ---
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 
 st.set_page_config(layout="wide", page_title="Brewery Invoice Parser")
 
@@ -247,7 +250,6 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        # Check for new "Match" status
         if row.get('Shopify_Status') == "Match" and pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
@@ -563,7 +565,26 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter API Key", type="password")
 
-    st.info("Logic loaded from `knowledge_base.py`")
+    # --- DEBUGGING TOOL: LIST AVAILABLE MODELS ---
+    if st.button("🛠️ List Available Models"):
+        if api_key:
+            try:
+                client = genai.Client(api_key=api_key)
+                # List models and find ones that support content generation
+                models = client.models.list()
+                st.write("### Supported Models:")
+                found = False
+                for m in models:
+                    if 'generateContent' in (m.supported_generation_methods or []):
+                        st.markdown(f"- `{m.name}`")
+                        found = True
+                if not found:
+                    st.warning("No models found with 'generateContent' support.")
+            except Exception as e:
+                st.error(f"Error listing models: {e}")
+        else:
+            st.warning("Enter API Key first.")
+
     st.divider()
     
     st.subheader("🧪 The Lab")
@@ -679,9 +700,10 @@ if st.button("🚀 Process Invoice", type="primary"):
                 {full_text}
                 """
 
-                # --- NEW GENERATION CALL USING SPECIFIC VERSION ---
+                # --- GENERATION CALL (DEFAULT to generic flash) ---
+                # Check sidebar tool for exact model name if 404 persists
                 response = client.models.generate_content(
-                    model='gemini-1.5-flash-001', # Fixed explicit version to prevent 404
+                    model='gemini-1.5-flash', 
                     contents=prompt
                 )
                 
