@@ -443,7 +443,7 @@ def run_reconciliation_check(lines_df):
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
                         
                         # --- UPDATE: Status Name ---
-                        status = "Match"
+                        status = "☑️ Match"
                         
                         match_found = True
                         full_title = prod['title']
@@ -459,7 +459,7 @@ def run_reconciliation_check(lines_df):
             
             # --- UPDATE: Consolidated Unmatched Status ---
             if not match_found: 
-                status = "Check and Upload"
+                status = "🔍 Check and Upload"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
@@ -511,7 +511,7 @@ def create_product_matrix(df):
     
     # --- UPDATE: Check for "Match" instead of "✅ Matched" ---
     if 'Shopify_Status' in df.columns:
-        df = df[df['Shopify_Status'] != "Match"]
+        df = df[df['Shopify_Status'] != "☑️ Match"]
         
     if df.empty: return pd.DataFrame()
 
