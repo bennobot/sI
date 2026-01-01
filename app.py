@@ -310,6 +310,11 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
 
 def fetch_shopify_products_by_vendor(vendor):
     if "shopify" not in st.secrets: return []
+    
+    # --- FIX: SAFEGUARD AGAINST NONE/NAN VENDOR ---
+    if not vendor or not isinstance(vendor, str):
+        return []
+    
     creds = st.secrets["shopify"]
     shop_url = creds.get("shop_url")
     token = creds.get("access_token")
@@ -317,6 +322,7 @@ def fetch_shopify_products_by_vendor(vendor):
     endpoint = f"https://{shop_url}/admin/api/{version}/graphql.json"
     headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     query = """query ($query: String!, $cursor: String) { products(first: 50, query: $query, after: $cursor) { pageInfo { hasNextPage endCursor } edges { node { id title status format_meta: metafield(namespace: "custom", key: "Format") { value } abv_meta: metafield(namespace: "custom", key: "ABV") { value } variants(first: 20) { edges { node { id title sku inventoryQuantity } } } } } } }"""
+    
     search_vendor = vendor.replace("'", "\\'") 
     variables = {"query": f"vendor:'{search_vendor}'"} 
     
@@ -365,7 +371,9 @@ def run_reconciliation_check(lines_df):
     df['Cin7_London_ID'] = "" 
     df['Gloucester_SKU'] = "" 
     df['Cin7_Glou_ID'] = ""   
-    suppliers = df['Supplier_Name'].unique()
+    
+    # Filter suppliers to ensure they are valid strings
+    suppliers = [s for s in df['Supplier_Name'].unique() if isinstance(s, str) and s.strip()]
     shopify_cache = {}
     
     progress_bar = st.progress(0)
@@ -382,7 +390,10 @@ def run_reconciliation_check(lines_df):
         status = "❓ Vendor Not Found"
         london_sku, glou_sku, cin7_l_id, cin7_g_id, img_url = "", "", "", "", ""
         matched_prod_name, matched_var_name = "", ""
-        supplier = row['Supplier_Name']
+        
+        # Safe string conversion for supplier logic
+        supplier = str(row.get('Supplier_Name', ''))
+        
         inv_prod_name = row['Product_Name']
         raw_pack = str(row.get('Pack_Size', '')).strip()
         inv_pack = "1" if raw_pack.lower() in ['none', 'nan', '', '0'] else raw_pack.replace('.0', '')
@@ -574,9 +585,7 @@ with st.sidebar:
                 models = client.models.list()
                 st.write("### Gemini Models Found:")
                 found = False
-                # Simple string filter to avoid attribute errors
                 for m in models:
-                    # m is a Model object, print name directly
                     if "gemini" in m.name.lower():
                         st.code(f"{m.name}")
                         found = True
@@ -702,7 +711,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 {full_text}
                 """
 
-                # --- GENERATION CALL ---
+                # --- GENERATION CALL (USING 2.5-flash as verified by user) ---
                 response = client.models.generate_content(
                     model='gemini-2.5-flash', 
                     contents=prompt
@@ -868,7 +877,6 @@ if st.session_state.header_data is not None:
                 
                 disp_matrix = st.session_state.matrix_data.copy()
                 
-                # --- CHANGE: STRICT COLUMN ORDERING ---
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
