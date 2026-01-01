@@ -250,6 +250,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
+        # Check for new "Match" status
         if row.get('Shopify_Status') == "Match" and pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
@@ -565,21 +566,22 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter API Key", type="password")
 
-    # --- DEBUGGING TOOL: LIST AVAILABLE MODELS ---
+    # --- DEBUGGING TOOL: FIXED LISTER ---
     if st.button("🛠️ List Available Models"):
         if api_key:
             try:
                 client = genai.Client(api_key=api_key)
-                # List models and find ones that support content generation
                 models = client.models.list()
-                st.write("### Supported Models:")
+                st.write("### Gemini Models Found:")
                 found = False
+                # Simple string filter to avoid attribute errors
                 for m in models:
-                    if 'generateContent' in (m.supported_generation_methods or []):
-                        st.markdown(f"- `{m.name}`")
+                    # m is a Model object, print name directly
+                    if "gemini" in m.name.lower():
+                        st.code(f"{m.name}")
                         found = True
                 if not found:
-                    st.warning("No models found with 'generateContent' support.")
+                    st.warning("No Gemini models found.")
             except Exception as e:
                 st.error(f"Error listing models: {e}")
         else:
@@ -700,8 +702,7 @@ if st.button("🚀 Process Invoice", type="primary"):
                 {full_text}
                 """
 
-                # --- GENERATION CALL (DEFAULT to generic flash) ---
-                # Check sidebar tool for exact model name if 404 persists
+                # --- GENERATION CALL ---
                 response = client.models.generate_content(
                     model='gemini-1.5-flash', 
                     contents=prompt
@@ -867,6 +868,7 @@ if st.session_state.header_data is not None:
                 
                 disp_matrix = st.session_state.matrix_data.copy()
                 
+                # --- CHANGE: STRICT COLUMN ORDERING ---
                 u_cols = ['Untappd_Status', 'Label_Thumb', 'Untappd_Brewery', 'Untappd_Product', 'Untappd_ABV', 'Untappd_Desc']
                 
                 base_cols = ['Supplier_Name', 'Product_Name', 'ABV']
