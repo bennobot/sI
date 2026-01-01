@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 from pdf2image import convert_from_bytes
 import pytesseract
-import google.generativeai as genai
+from google import genai # <--- UPDATED LIBRARY
+from google.genai import types
 import json
 import re
 import io
@@ -246,7 +247,7 @@ def create_cin7_purchase_order(header_df, lines_df, location_choice):
     
     for _, row in lines_df.iterrows():
         prod_id = row.get(id_col)
-        # --- UPDATE: Check for "Match" instead of "✅ Matched" ---
+        # Check for new "Match" status
         if row.get('Shopify_Status') == "Match" and pd.notna(prod_id) and str(prod_id).strip():
             qty = float(row.get('Quantity', 0))
             price = float(row.get('Item_Price', 0))
@@ -441,10 +442,7 @@ def run_reconciliation_check(lines_df):
                     
                     if pack_ok and vol_ok:
                         logs.append(f"   ✅ MATCH: `{variant['title']}` | SKU: `{v_sku}`")
-                        
-                        # --- UPDATE: Status Name ---
-                        status = "☑️ Match"
-                        
+                        status = "Match"
                         match_found = True
                         full_title = prod['title']
                         matched_prod_name = full_title[2:] if full_title.startswith("L-") or full_title.startswith("G-") else full_title
@@ -454,12 +452,10 @@ def run_reconciliation_check(lines_df):
                             base_sku = v_sku[2:]
                             london_sku = f"L-{base_sku}"
                             glou_sku = f"G-{base_sku}"
+                        results.append(row)
                         break
                 if match_found: break
-            
-            # --- UPDATE: Consolidated Unmatched Status ---
-            if not match_found: 
-                status = "🔍 Check and Upload"
+            if not match_found: status = "Check and Upload"
         
         if london_sku: cin7_l_id = get_cin7_product_id(london_sku)
         if glou_sku: cin7_g_id = get_cin7_product_id(glou_sku)
@@ -508,11 +504,8 @@ def clean_product_names(df):
 def create_product_matrix(df):
     if df is None or df.empty: return pd.DataFrame()
     df = df.fillna("")
-    
-    # --- UPDATE: Check for "Match" instead of "✅ Matched" ---
     if 'Shopify_Status' in df.columns:
-        df = df[df['Shopify_Status'] != "☑️ Match"]
-        
+        df = df[df['Shopify_Status'] != "Match"]
     if df.empty: return pd.DataFrame()
 
     group_cols = ['Supplier_Name', 'Collaborator', 'Product_Name', 'ABV']
@@ -561,7 +554,7 @@ if 'cin7_all_suppliers' not in st.session_state: st.session_state.cin7_all_suppl
 if 'line_items_key' not in st.session_state: st.session_state.line_items_key = 0
 if 'matrix_key' not in st.session_state: st.session_state.matrix_key = 0
 
-# --- SIDEBAR (Reduced) ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
     if "GOOGLE_API_KEY" in st.secrets:
@@ -647,8 +640,8 @@ if st.button("🚀 Process Invoice", type="primary"):
         try:
             with st.status("Processing Document...", expanded=True) as status:
                 
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('models/gemini-2.5-flash')
+                # --- UPDATE: USE NEW CLIENT SDK ---
+                client = genai.Client(api_key=api_key)
                 
                 st.write("1. Converting PDF to Images (OCR Prep)...")
                 target_stream.seek(0)
@@ -686,7 +679,11 @@ if st.button("🚀 Process Invoice", type="primary"):
                 {full_text}
                 """
 
-                response = model.generate_content(prompt)
+                # --- UPDATE: USE NEW GENERATION METHOD ---
+                response = client.models.generate_content(
+                    model='gemini-1.5-flash', 
+                    contents=prompt
+                )
                 
                 st.write("4. Parsing Response...")
                 try:
@@ -744,7 +741,6 @@ if st.session_state.header_data is not None:
     # 1. CALCULATE STATUS
     df = st.session_state.line_items
     if 'Shopify_Status' in df.columns:
-        # --- UPDATE: Check for "Match" ---
         unmatched_count = len(df[df['Shopify_Status'] != "Match"])
     else:
         unmatched_count = len(df) 
